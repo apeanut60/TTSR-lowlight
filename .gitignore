@@ -1,0 +1,50 @@
+
+# ===== Python 缓存和虚拟环境 =====
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.ipynb_checkpoints/
+.pytest_cache/
+
+# ===== 实际图片数据：按你的目录名称修改 =====
+/raw_data/
+/results_old/
+/showcase/
+/20260702/
+
+# ===== 模型权重 =====
+*.pth
+*.pt
+*.ckpt
+*.safetensors
+*.onnx
+/checkpoints/
+/pretrained_weights/
+
+# ===== 训练日志和生成结果 =====
+/logs/
+/runs/
+/outputs/
+/results/
+/wandb/
+*.log
+events.out.tfevents.*
+
+# ===== 压缩包 =====
+*.zip
+*.tar
+*.tar.gz
+*.7z
+*.rar
+
+# ===== 敏感配置、密钥和本机文件 =====
+.env
+.env.*
+!.env.example
+.ssh/
+*.pem
+*.key
+id_rsa*
+id_ed25519*
+.DS_Store
