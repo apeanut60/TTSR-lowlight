@@ -46,6 +46,14 @@ class Trainer():
                 param.requires_grad = False
                 frozen_names.append(name)
 
+        if not frozen_names:
+            # The prefix table above is MainNetEnhance-specific. A different
+            # backbone would silently freeze nothing, so fail loudly instead.
+            raise RuntimeError(
+                'freeze_stages=%r matched no parameters — the stage prefix '
+                'table in freeze_mainnet_stages does not describe this '
+                'backbone (%s)' % (freeze_stages, type(mainnet).__name__))
+
         return model, frozen_names
 
     def __init__(self, args, logger, dataloader, model, loss_all):
@@ -115,6 +123,32 @@ class Trainer():
             self.params.append({"params": lte_params, "lr": args.lr_rate_lte})
         if not self.params:
             raise RuntimeError('No trainable parameters remain after freezing')
+
+        # Guard against silently-empty groups. A renamed submodule would
+        # otherwise move its parameters into the generic mainnet group and make
+        # --lr_rate_refillum / --lr_rate_illum / --lr_rate_stage2 no-ops
+        # instead of raising.
+        ref_illum_mod = getattr(mainnet, 'ref_illum', None)
+        if ref_illum_mod is not None:
+            n_trainable = len([p for p in ref_illum_mod.parameters()
+                               if p.requires_grad])
+            if n_trainable and not refillum_params:
+                raise RuntimeError(
+                    'ref_illum has %d trainable tensors but the refillum '
+                    'optimizer group is empty — the prefix "ref_illum." must '
+                    'match this backbone\'s submodule name.' % n_trainable)
+        seen = {}
+        for gi, g in enumerate(self.params):
+            for p in g['params']:
+                if id(p) in seen:
+                    raise RuntimeError(
+                        'parameter appears in two optimizer groups (%d and %d)'
+                        % (seen[id(p)], gi))
+                seen[id(p)] = gi
+        for gi, g in enumerate(self.params):
+            self.logger.info('optimizer group %d/%d: %d tensors, lr=%g'
+                             % (gi + 1, len(self.params), len(g['params']),
+                                g['lr']))
 
         self.optimizer = optim.Adam(self.params, betas=(args.beta1, args.beta2), eps=args.eps)
         self.scheduler = optim.lr_scheduler.StepLR(
@@ -268,7 +302,11 @@ class Trainer():
         self.model.train()
         if (not is_init):
             self.scheduler.step()
-        self.logger.info('Current epoch learning rate: %e' %(self.optimizer.param_groups[0]['lr']))
+        # Log every group, not just the first: a silently-empty group (wrong
+        # submodule name) would otherwise be invisible here.
+        self.logger.info('Current epoch learning rates: ' + '  '.join(
+            'g%d(%d tensors)=%.3e' % (i + 1, len(g['params']), g['lr'])
+            for i, g in enumerate(self.optimizer.param_groups)))
 
         for i_batch, sample_batched in enumerate(self.dataloader['train']):
             self.optimizer.zero_grad()
@@ -359,15 +397,25 @@ class Trainer():
             self.optimizer.step()
 
         if ((not is_init) and current_epoch % self.args.save_every == 0):
-            self.logger.info('saving the model...')
-            tmp = self.model.state_dict()
-            model_state_dict = {key.replace('module.',''): tmp[key] for key in tmp if 
-                (('SearchNet' not in key) and ('_copy' not in key))}
-            model_dir = os.path.join(self.args.save_dir, 'model')
-            os.makedirs(model_dir, exist_ok=True)
-            model_name = os.path.join(model_dir,
-                'model_' + str(current_epoch).zfill(5) + '.pt')
-            torch.save(model_state_dict, model_name)
+            self.save(current_epoch)
+
+    def save(self, current_epoch):
+        """Write a checkpoint for this epoch.
+
+        Split out of ``train`` so the driver can force a final checkpoint on
+        the last epoch even when ``num_epochs % save_every != 0`` (otherwise
+        the tail of every run is silently lost).
+        """
+        self.logger.info('saving the model...')
+        tmp = self.model.state_dict()
+        model_state_dict = {key.replace('module.',''): tmp[key] for key in tmp if
+            (('SearchNet' not in key) and ('_copy' not in key))}
+        model_dir = os.path.join(self.args.save_dir, 'model')
+        os.makedirs(model_dir, exist_ok=True)
+        model_name = os.path.join(model_dir,
+            'model_' + str(current_epoch).zfill(5) + '.pt')
+        torch.save(model_state_dict, model_name)
+        return model_name
 
     def evaluate(self, current_epoch=0):
         self.logger.info('Epoch ' + str(current_epoch) + ' evaluation process...')

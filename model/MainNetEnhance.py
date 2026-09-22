@@ -328,7 +328,7 @@ class MainNetEnhance(nn.Module):
 
     def forward(self, x, S=None, T_lv3=None, T_lv2=None, T_lv1=None,
                 apply_illum=True, ref=None, apply_ref_illum=True,
-                use_reference=True):
+                use_reference=True, inject_lv2=True, inject_lv1=True):
         low_input = x
         # Shallow feature extraction
         x = self.SFE(x)  # [N, n_feats, H, W]
@@ -367,7 +367,7 @@ class MainNetEnhance(nn.Module):
         x22 = x
 
         # Soft-attention: inject T_lv2
-        if use_reference:
+        if use_reference and inject_lv2:
             x22_res = torch.cat((x22, T_lv2_up), dim=1)
             x22_res = self.conv22_head(x22_res)
             x22_res = x22_res * S_up
@@ -395,7 +395,7 @@ class MainNetEnhance(nn.Module):
         x33 = x
 
         # Soft-attention: inject T_lv1
-        if use_reference:
+        if use_reference and inject_lv1:
             x33_res = torch.cat((x33, T_lv1_up), dim=1)
             x33_res = self.conv33_head(x33_res)
             x33_res = x33_res * S_up

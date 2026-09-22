@@ -7,7 +7,7 @@ Key differences from TTSR:
 - Supports optional pre-trained weight loading from TTSR
 """
 
-from model import MainNetEnhance, LTE, SearchTransfer
+from model import MainNetEnhance, LTE, SearchTransfer, RetinexRefMainNet
 
 import torch
 import torch.nn as nn
@@ -52,11 +52,23 @@ class TTSREnhance(nn.Module):
         self.args = args
         self.num_res_blocks = list(
             map(int, args.num_res_blocks.split('+')))
-        self.MainNet = MainNetEnhance.MainNetEnhance(
-            num_res_blocks=self.num_res_blocks,
-            n_feats=args.n_feats,
-            res_scale=args.res_scale,
-            ref_illum_pool=getattr(args, 'ref_illum_pool', 8))
+        self.backbone = getattr(args, 'enhance_backbone', 'ttsr')
+        if self.backbone == 'retinexformer':
+            # Only one backbone is ever constructed, so the default TTSR path
+            # keeps its exact random-init sequence.
+            n_blocks = [int(x) for x in
+                        str(getattr(args, 'retinex_num_blocks', '1,2,2')).split(',')]
+            self.MainNet = RetinexRefMainNet.RetinexRefMainNet(
+                n_feat=getattr(args, 'retinex_n_feat', 40),
+                num_blocks=n_blocks,
+                ref_illum_pool=getattr(args, 'ref_illum_pool', 8),
+                use_global_illum=not getattr(args, 'no_global_illum', False))
+        else:
+            self.MainNet = MainNetEnhance.MainNetEnhance(
+                num_res_blocks=self.num_res_blocks,
+                n_feats=args.n_feats,
+                res_scale=args.res_scale,
+                ref_illum_pool=getattr(args, 'ref_illum_pool', 8))
         freeze_lte = getattr(args, 'freeze_lte', False)
         self.LTE = LTE.LTE(requires_grad=not freeze_lte)
         self.LTE_copy = LTE.LTE(
@@ -91,8 +103,23 @@ class TTSREnhance(nn.Module):
 
         return z(1, h3, w3), z(256, h3, w3), z(128, h2, w2), z(64, h1, w1)
 
+    def _pad_to_4(self, *tensors):
+        """Replicate-pad (H, W) up to a multiple of 4.
+
+        Retinexformer downsamples twice with Conv2d(k=4, s=2, p=1) and
+        upsamples with ConvTranspose2d(k=2, s=2), then concatenates with the
+        encoder skips — so H and W must be divisible by 4 or the decoder and
+        encoder shapes will not line up. Returns (padded tensors, h0, w0).
+        """
+        h0, w0 = tensors[0].shape[-2:]
+        ph, pw = (-h0) % 4, (-w0) % 4
+        if ph or pw:
+            tensors = tuple(F.pad(t, (0, pw, 0, ph), mode='replicate')
+                            for t in tensors)
+        return tensors, h0, w0
+
     def forward(self, lr=None, lrsr=None, ref=None, refsr=None, sr=None,
-                return_ref=False, apply_illum=True, apply_ref_illum=None,
+                return_ref=False, apply_illum=None, apply_ref_illum=None,
                 use_reference=None):
         if (type(sr) != type(None)):
             # Used in transferal perceptual loss
@@ -100,53 +127,79 @@ class TTSREnhance(nn.Module):
             sr_lv1, sr_lv2, sr_lv3 = self.LTE_copy((sr + 1.) / 2.)
             return sr_lv1, sr_lv2, sr_lv3
 
-        if apply_ref_illum is None:
-            apply_ref_illum = not getattr(self.args, 'no_ref_illum', False)
-
         if use_reference is None:
             use_reference = not getattr(self.args, 'no_reference', False)
+        if apply_ref_illum is None:
+            apply_ref_illum = (use_reference
+                               and not getattr(self.args, 'no_ref_illum', False))
+        if apply_illum is None:
+            apply_illum = not getattr(self.args, 'no_global_illum', False)
 
-        if not use_reference:
-            # No-reference baseline: every reference-dependent path is off,
-            # including the reference illumination transfer.
-            sr = self.MainNet(lr, apply_illum=apply_illum, ref=None,
-                              apply_ref_illum=False, use_reference=False)
-            S, T_lv3, T_lv2, T_lv1 = self._dummy_ref_outputs(lr)
-            if return_ref:
-                return sr, S, T_lv3, T_lv2, T_lv1, None
-            return sr, S, T_lv3, T_lv2, T_lv1
+        # use_reference gates everything reference-driven;
+        # no_ref_texture additionally drops only the texture path.
+        use_texture = (use_reference
+                       and not getattr(self.args, 'no_ref_texture', False))
 
-        # Extract VGG features for search and texture transfer
-        # lrsr/refsr are raw images at the same resolution (no bicubic needed)
-        if self.RefCorrection is not None:
-            ref_input = self.RefCorrection(ref)
-            refsr_input = self.RefCorrection(refsr)
+        h0, w0 = lr.shape[-2:]
+        if self.backbone == 'retinexformer':
+            (lr, lrsr, ref, refsr), h0, w0 = self._pad_to_4(lr, lrsr, ref, refsr)
+
+        # Reference tensor consumed by RefIllumTransfer. `ref` in MainNet is
+        # used ONLY by ref_illum, so it is worth computing whenever that path
+        # is active — even when the texture path is off.
+        if use_texture or apply_ref_illum:
+            if self.RefCorrection is not None:
+                ref_input = self.RefCorrection(ref)
+            else:
+                ref_input = ref.detach()
         else:
-            ref_input = ref.detach()
-            refsr_input = refsr.detach()
+            ref_input = None
 
-        _, _, lrsr_lv3 = self.LTE((lrsr.detach() + 1.) / 2.)
-        _, _, refsr_lv3 = self.LTE((refsr_input + 1.) / 2.)
+        if use_texture:
+            # Extract VGG features for search and texture transfer.
+            # lrsr/refsr are raw images at the same resolution (no bicubic needed)
+            if self.RefCorrection is not None:
+                refsr_input = self.RefCorrection(refsr)
+            else:
+                refsr_input = refsr.detach()
 
-        ref_lv1, ref_lv2, ref_lv3 = self.LTE((ref_input + 1.) / 2.)
+            _, _, lrsr_lv3 = self.LTE((lrsr.detach() + 1.) / 2.)
+            _, _, refsr_lv3 = self.LTE((refsr_input + 1.) / 2.)
+            ref_lv1, ref_lv2, ref_lv3 = self.LTE((ref_input + 1.) / 2.)
 
-        S, T_lv3, T_lv2, T_lv1 = self.SearchTransfer(
-            lrsr_lv3, refsr_lv3, ref_lv1, ref_lv2, ref_lv3,
-            oracle_matching=getattr(self.args, 'oracle_matching', 'off'))
+            S, T_lv3, T_lv2, T_lv1 = self.SearchTransfer(
+                lrsr_lv3, refsr_lv3, ref_lv1, ref_lv2, ref_lv3,
+                oracle_matching=getattr(self.args, 'oracle_matching', 'off'))
+        else:
+            # Texture path genuinely skipped: LTE and SearchTransfer do not run.
+            S, T_lv3, T_lv2, T_lv1 = self._dummy_ref_outputs(lr)
 
         # Control experiment: RefIllumTransfer keeps its capacity and training
         # schedule but receives a constant image instead of the reference, so
         # its gain can be split into "extra correction capacity" vs
         # "reference content". `ref` in MainNet is consumed ONLY by ref_illum.
         illum_ref = ref_input
-        if getattr(self.args, 'ref_illum_const_ref', False):
+        if (illum_ref is not None
+                and getattr(self.args, 'ref_illum_const_ref', False)):
             illum_ref = torch.zeros_like(ref_input)
 
-        # MainNetEnhance at 1:1 resolution
+        # Control for the backbone comparison: on the ttsr backbone, keep only
+        # the T_lv3 injection so a backbone swap is not confounded with a
+        # change of the texture injection topology.
+        lv3_only = bool(getattr(self.args, 'texture_lv3_only', False))
         sr = self.MainNet(lr, S, T_lv3, T_lv2, T_lv1,
                           apply_illum=apply_illum, ref=illum_ref,
                           apply_ref_illum=apply_ref_illum,
-                          use_reference=True)
+                          use_reference=use_texture,
+                          inject_lv2=not lv3_only, inject_lv1=not lv3_only)
+
+        # Undo the padding (only ever non-zero for the retinexformer backbone).
+        if sr.shape[-2:] != (h0, w0):
+            sr = sr[..., :h0, :w0]
+            S = S[..., :h0 // 4, :w0 // 4]
+            T_lv3 = T_lv3[..., :h0 // 4, :w0 // 4]
+            T_lv2 = T_lv2[..., :h0 // 2, :w0 // 2]
+            T_lv1 = T_lv1[..., :h0, :w0]
 
         if return_ref:
             return sr, S, T_lv3, T_lv2, T_lv1, ref_input

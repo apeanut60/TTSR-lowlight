@@ -101,8 +101,10 @@ if __name__ == '__main__':
     else:
         for epoch in range(1, args.num_init_epochs+1):
             t.train(current_epoch=epoch, is_init=True)
+        last_completed_epoch = 0
         for epoch in range(1, args.num_epochs+1):
             t.train(current_epoch=epoch, is_init=False)
+            last_completed_epoch = epoch
             if (epoch % args.val_every == 0):
                 t.evaluate(current_epoch=epoch)
                 if getattr(t, 'data1_psnr_floor_violated', False):
@@ -110,3 +112,13 @@ if __name__ == '__main__':
                         'EARLY STOP: data1 PSNR floor violation at epoch %d'
                         % epoch)
                     break
+
+        # Always keep the last completed epoch, even when
+        # num_epochs % save_every != 0 (otherwise the tail of every run is lost).
+        if last_completed_epoch:
+            ckpt = os.path.join(args.save_dir, 'model',
+                                'model_%05d.pt' % last_completed_epoch)
+            if not os.path.exists(ckpt):
+                _logger.info('Epoch %d was not covered by save_every; saving it.'
+                             % last_completed_epoch)
+                t.save(last_completed_epoch)

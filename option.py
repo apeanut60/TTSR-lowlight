@@ -65,6 +65,26 @@ parser.add_argument('--num_workers', type=int, default=4,
 ### mode setting
 parser.add_argument('--enhance_mode', type=str2bool, default=True,
                     help='Use low-light enhancement mode (1:1 resolution) instead of super-resolution (4x)')
+parser.add_argument('--enhance_backbone', type=str, default='ttsr',
+                    choices=['ttsr', 'retinexformer'],
+                    help='Enhancement backbone: "ttsr" = MainNetEnhance (default, unchanged), '
+                         '"retinexformer" = Retinexformer + H/4 texture adapter')
+parser.add_argument('--retinex_n_feat', type=int, default=40,
+                    help='Retinexformer base width (official LOL-v1 setting: 40)')
+parser.add_argument('--retinex_num_blocks', type=str, default='1,2,2',
+                    help='Retinexformer num_blocks, comma separated (official LOL-v1: 1,2,2)')
+parser.add_argument('--no_ref_texture', type=str2bool, default=False,
+                    help='Disable only the texture path (LTE search/transfer + adapter). '
+                         'RefIllumTransfer keeps receiving the reference.')
+parser.add_argument('--texture_lv3_only', type=str2bool, default=False,
+                    help='CONTROL for the backbone comparison: keep only the T_lv3 injection '
+                         '(stage 1) on the ttsr backbone, disabling the T_lv2/T_lv1 '
+                         'injections. Lets a backbone swap be separated from a change of the '
+                         'texture injection topology. Ignored by the retinexformer backbone, '
+                         'which injects T_lv3 only by construction.')
+parser.add_argument('--no_global_illum', type=str2bool, default=False,
+                    help='Disable GlobalIllumHead entirely (not constructed, so it adds no '
+                         'parameters and no post-processing step)')
 
 ### model setting
 parser.add_argument('--num_res_blocks', type=str, default='8+8+4+2',
