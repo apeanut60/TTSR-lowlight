@@ -17,6 +17,18 @@ if __name__ == '__main__':
     ### make save_dir
     _logger = mkExpDir(args)
 
+    ### reproducibility (needed for fair A/B ablations)
+    if getattr(args, 'seed', -1) >= 0:
+        import random
+        import numpy as np
+        random.seed(args.seed)
+        np.random.seed(args.seed)
+        torch.manual_seed(args.seed)
+        torch.cuda.manual_seed_all(args.seed)
+        torch.backends.cudnn.benchmark = False
+        _logger.info('Random seed: %d (init + data order reproducible; '
+                     'cudnn.benchmark=False)' % args.seed)
+
     ### dataloader of training set and testing set
     _dataloader = dataloader.get_dataloader(args) if (not args.test) else None
     if (_dataloader is not None and (not args.test) and (not args.eval)):

@@ -327,28 +327,33 @@ class MainNetEnhance(nn.Module):
         return x
 
     def forward(self, x, S=None, T_lv3=None, T_lv2=None, T_lv1=None,
-                apply_illum=True, ref=None, apply_ref_illum=True):
+                apply_illum=True, ref=None, apply_ref_illum=True,
+                use_reference=True):
         low_input = x
         # Shallow feature extraction
         x = self.SFE(x)  # [N, n_feats, H, W]
         H, W = x.size()[-2:]
 
-        # Upsample T tensors and S to match MainNet feature spatial size
-        # VGG LTE gives: lv1 at H×W, lv2 at H/2×W/2, lv3 at H/4×W/4
-        # SearchTransfer returns T at native VGG scales:
-        #   T_lv3 @ H/4×W/4, T_lv2 @ H/2×W/2, T_lv1 @ H×W, S @ H/4×W/4
-        T_lv3_up = F.interpolate(T_lv3, size=(H, W), mode='bicubic')
-        T_lv2_up = F.interpolate(T_lv2, size=(H, W), mode='bicubic')
-        T_lv1_up = F.interpolate(T_lv1, size=(H, W), mode='bicubic')
-        S_up = F.interpolate(S, size=(H, W), mode='bicubic')
-        S_up = torch.sigmoid(S_up)  # [0,1] soft-gate, consistent with tpl_loss
+        if use_reference:
+            # Upsample T tensors and S to match MainNet feature spatial size
+            # VGG LTE gives: lv1 at H×W, lv2 at H/2×W/2, lv3 at H/4×W/4
+            # SearchTransfer returns T at native VGG scales:
+            #   T_lv3 @ H/4×W/4, T_lv2 @ H/2×W/2, T_lv1 @ H×W, S @ H/4×W/4
+            T_lv3_up = F.interpolate(T_lv3, size=(H, W), mode='bicubic')
+            T_lv2_up = F.interpolate(T_lv2, size=(H, W), mode='bicubic')
+            T_lv1_up = F.interpolate(T_lv1, size=(H, W), mode='bicubic')
+            S_up = F.interpolate(S, size=(H, W), mode='bicubic')
+            S_up = torch.sigmoid(S_up)  # [0,1] soft-gate, consistent with tpl_loss
+        else:
+            T_lv3_up = T_lv2_up = T_lv1_up = S_up = None
 
         # ── Stage1 ──
         x11 = x
-        x11_res = torch.cat((x11, T_lv3_up), dim=1)
-        x11_res = self.conv11_head(x11_res)
-        x11_res = x11_res * S_up
-        x11 = x11 + x11_res
+        if use_reference:
+            x11_res = torch.cat((x11, T_lv3_up), dim=1)
+            x11_res = self.conv11_head(x11_res)
+            x11_res = x11_res * S_up
+            x11 = x11 + x11_res
 
         x11_res = x11
         for i in range(self.num_res_blocks[1]):
@@ -362,10 +367,11 @@ class MainNetEnhance(nn.Module):
         x22 = x
 
         # Soft-attention: inject T_lv2
-        x22_res = torch.cat((x22, T_lv2_up), dim=1)
-        x22_res = self.conv22_head(x22_res)
-        x22_res = x22_res * S_up
-        x22 = x22 + x22_res
+        if use_reference:
+            x22_res = torch.cat((x22, T_lv2_up), dim=1)
+            x22_res = self.conv22_head(x22_res)
+            x22_res = x22_res * S_up
+            x22 = x22 + x22_res
 
         x22_res = x22
 
@@ -389,10 +395,11 @@ class MainNetEnhance(nn.Module):
         x33 = x
 
         # Soft-attention: inject T_lv1
-        x33_res = torch.cat((x33, T_lv1_up), dim=1)
-        x33_res = self.conv33_head(x33_res)
-        x33_res = x33_res * S_up
-        x33 = x33 + x33_res
+        if use_reference:
+            x33_res = torch.cat((x33, T_lv1_up), dim=1)
+            x33_res = self.conv33_head(x33_res)
+            x33_res = x33_res * S_up
+            x33 = x33 + x33_res
 
         x33_res = x33
 
@@ -415,7 +422,7 @@ class MainNetEnhance(nn.Module):
         x = self.merge_tail(x31, x32, x33)
 
         # Reference-driven low-frequency illumination (tone / brightness)
-        if apply_ref_illum:
+        if apply_ref_illum and ref is not None:
             x = self.apply_ref_illum(x, low_input, ref)
 
         # Per-image global illumination correction (gamma + gain + bias)

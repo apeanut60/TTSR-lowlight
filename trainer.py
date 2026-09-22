@@ -12,9 +12,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 import torchvision.utils as utils
-import lpips
-
-
 class Trainer():
     @staticmethod
     def freeze_mainnet_stages(model, freeze_stages, num_gpu=1):
@@ -61,7 +58,6 @@ class Trainer():
         self.vgg19 = Vgg19.Vgg19(requires_grad=False).to(self.device)
         if ((not self.args.cpu) and (self.args.num_gpu > 1)):
             self.vgg19 = nn.DataParallel(self.vgg19, list(range(self.args.num_gpu)))
-        self.lpips_fn = lpips.LPIPS(net='alex').to(self.device)
 
         wrapped = self.model.module if hasattr(self.model, 'module') else self.model
         mainnet = wrapped.MainNet
@@ -379,8 +375,8 @@ class Trainer():
         if (self.args.dataset == 'CUFED'):
             self.model.eval()
             with torch.no_grad():
-                psnr, psnr_rgb, ssim, mse, lpips, cnt = 0., 0., 0., 0., 0., 0
-                ap_psnr, ap_psnr_rgb, ap_ssim, ap_mse, ap_lpips = 0., 0., 0., 0., 0.
+                psnr, psnr_rgb, ssim, mse, cnt = 0., 0., 0., 0., 0
+                ap_psnr, ap_psnr_rgb, ap_ssim, ap_mse = 0., 0., 0., 0.
                 do_align = getattr(self.args, 'eval_mean_align', True)
                 cg = getattr(self.args, 'eval_chroma_gain', 1.0)
                 for i_batch, sample_batched in enumerate(self.dataloader['test']['1']):
@@ -405,22 +401,20 @@ class Trainer():
                         imsave(os.path.join(self.args.save_dir, 'save_results', str(i_batch).zfill(5)+'.png'), sr_save)
                     
                     _psnr, _ssim, _mse, _psnr_rgb = calc_psnr_and_ssim(sr.detach(), hr.detach())
-                    _lpips = self.lpips_fn(sr, hr).item()
-                    psnr += _psnr; ssim += _ssim; mse += _mse; lpips += _lpips
+                    psnr += _psnr; ssim += _ssim; mse += _mse
                     psnr_rgb += _psnr_rgb
                     if do_align:
                         sr_al = mean_align(sr, hr)
                         a_p, a_s, a_m, a_prgb = calc_psnr_and_ssim(sr_al.detach(), hr.detach())
                         ap_psnr += a_p; ap_ssim += a_s; ap_mse += a_m; ap_psnr_rgb += a_prgb
-                        ap_lpips += self.lpips_fn(sr_al, hr).item()
 
                 psnr_ave, ssim_ave = psnr / cnt, ssim / cnt
-                mse_ave, lpips_ave = mse / cnt, lpips / cnt
-                self.logger.info('%s  PSNR: %.3f  PSNRy: %.3f  SSIM: %.4f  LPIPS: %.4f  MSE: %.2f' %(self.args.dataset, psnr_rgb / cnt, psnr_ave, ssim_ave, lpips_ave, mse_ave))
+                mse_ave = mse / cnt
+                self.logger.info('%s  PSNR: %.3f  PSNRy: %.3f  SSIM: %.4f  MSE: %.2f' %(self.args.dataset, psnr_rgb / cnt, psnr_ave, ssim_ave, mse_ave))
                 if do_align:
-                    self.logger.info('%s  PSNR(mean-aligned): %.3f  PSNRy(mean-aligned): %.3f  SSIM(mean-aligned): %.4f  LPIPS(mean-aligned): %.4f  MSE(mean-aligned): %.2f'
+                    self.logger.info('%s  PSNR(mean-aligned): %.3f  PSNRy(mean-aligned): %.3f  SSIM(mean-aligned): %.4f  MSE(mean-aligned): %.2f'
                                      % (self.args.dataset, ap_psnr_rgb / cnt, ap_psnr / cnt, ap_ssim / cnt,
-                                        ap_lpips / cnt, ap_mse / cnt))
+                                        ap_mse / cnt))
                 if (psnr_rgb / cnt > self.max_psnr):
                     self.max_psnr = psnr_rgb / cnt
                     self.max_psnr_epoch = current_epoch
@@ -437,11 +431,11 @@ class Trainer():
 
         else:
             # Every non-CUFED dataset evaluates its own test set here, so all
-            # datasets report the same metric set (PSNR, PSNRy, SSIM, LPIPS).
+            # datasets report the same metric set (PSNR, PSNRy, SSIM, MSE).
             self.model.eval()
             with torch.no_grad():
-                psnr, psnr_rgb, ssim, mse, lpips, cnt = 0., 0., 0., 0., 0., 0
-                ap_psnr, ap_psnr_rgb, ap_ssim, ap_mse, ap_lpips = 0., 0., 0., 0., 0.
+                psnr, psnr_rgb, ssim, mse, cnt = 0., 0., 0., 0., 0
+                ap_psnr, ap_psnr_rgb, ap_ssim, ap_mse = 0., 0., 0., 0.
                 do_align = getattr(self.args, 'eval_mean_align', True)
                 cg = getattr(self.args, 'eval_chroma_gain', 1.0)
                 for i_batch, sample_batched in enumerate(self.dataloader['test']['1']):
@@ -479,13 +473,11 @@ class Trainer():
                                             str(i_batch).zfill(5) + '_input.png'),
                                lr_save)
 
-                    # Calculate PSNR, SSIM, MSE, LPIPS
+                    # Calculate PSNR, SSIM, MSE
                     _psnr, _ssim, _mse, _psnr_rgb = calc_psnr_and_ssim(sr.detach(), hr.detach())
-                    _lpips = self.lpips_fn(sr, hr).item()
                     psnr += _psnr
                     ssim += _ssim
                     mse += _mse
-                    lpips += _lpips
                     psnr_rgb += _psnr_rgb
                     if do_align:
                         sr_al = mean_align(sr, hr)
@@ -494,18 +486,16 @@ class Trainer():
                         ap_ssim += a_s
                         ap_mse += a_m
                         ap_psnr_rgb += a_prgb
-                        ap_lpips += self.lpips_fn(sr_al, hr).item()
 
                 psnr_ave = psnr / cnt
                 ssim_ave = ssim / cnt
                 mse_ave = mse / cnt
-                lpips_ave = lpips / cnt
-                self.logger.info('%s  PSNR: %.3f  PSNRy: %.3f  SSIM: %.4f  LPIPS: %.4f  MSE: %.2f'
-                                 % (self.args.dataset, psnr_rgb / cnt, psnr_ave, ssim_ave, lpips_ave, mse_ave))
+                self.logger.info('%s  PSNR: %.3f  PSNRy: %.3f  SSIM: %.4f  MSE: %.2f'
+                                 % (self.args.dataset, psnr_rgb / cnt, psnr_ave, ssim_ave, mse_ave))
                 if do_align:
-                    self.logger.info('%s  PSNR(mean-aligned): %.3f  PSNRy(mean-aligned): %.3f  SSIM(mean-aligned): %.4f  LPIPS(mean-aligned): %.4f  MSE(mean-aligned): %.2f'
+                    self.logger.info('%s  PSNR(mean-aligned): %.3f  PSNRy(mean-aligned): %.3f  SSIM(mean-aligned): %.4f  MSE(mean-aligned): %.2f'
                                      % (self.args.dataset, ap_psnr_rgb / cnt, ap_psnr / cnt, ap_ssim / cnt,
-                                        ap_lpips / cnt, ap_mse / cnt))
+                                        ap_mse / cnt))
                 if psnr_rgb / cnt > self.max_psnr:
                     self.max_psnr = psnr_rgb / cnt
                     self.max_psnr_epoch = current_epoch
@@ -534,8 +524,8 @@ class Trainer():
 
         for name, loader in extra_test.items():
             self.model.eval()
-            psnr, psnr_rgb, ssim, mse, lpips, cnt = 0., 0., 0., 0., 0., 0
-            ap_psnr, ap_psnr_rgb, ap_ssim, ap_mse, ap_lpips = 0., 0., 0., 0., 0.
+            psnr, psnr_rgb, ssim, mse, cnt = 0., 0., 0., 0., 0
+            ap_psnr, ap_psnr_rgb, ap_ssim, ap_mse = 0., 0., 0., 0.
             do_align = getattr(self.args, 'eval_mean_align', True)
             cg = getattr(self.args, 'eval_chroma_gain', 1.0)
             with torch.no_grad():
@@ -558,11 +548,9 @@ class Trainer():
                             lr=lr, lr_sr=lr_sr, ref=ref, ref_sr=ref_sr)
                     sr = chroma_gain(sr, cg)
                     _psnr, _ssim, _mse, _psnr_rgb = calc_psnr_and_ssim(sr.detach(), hr.detach())
-                    _lpips = self.lpips_fn(sr, hr).item()
                     psnr += _psnr
                     ssim += _ssim
                     mse += _mse
-                    lpips += _lpips
                     psnr_rgb += _psnr_rgb
                     if do_align:
                         sr_al = mean_align(sr, hr)
@@ -571,7 +559,6 @@ class Trainer():
                         ap_ssim += a_s
                         ap_mse += a_m
                         ap_psnr_rgb += a_prgb
-                        ap_lpips += self.lpips_fn(sr_al, hr).item()
 
             if (cnt == 0):
                 self.logger.info('%s  evaluation skipped: empty loader' % name)
@@ -580,13 +567,12 @@ class Trainer():
             psnr_ave = psnr / cnt
             ssim_ave = ssim / cnt
             mse_ave = mse / cnt
-            lpips_ave = lpips / cnt
-            self.logger.info('%s  PSNR: %.3f  PSNRy: %.3f  SSIM: %.4f  LPIPS: %.4f  MSE: %.2f'
-                             % (name, psnr_rgb / cnt, psnr_ave, ssim_ave, lpips_ave, mse_ave))
+            self.logger.info('%s  PSNR: %.3f  PSNRy: %.3f  SSIM: %.4f  MSE: %.2f'
+                             % (name, psnr_rgb / cnt, psnr_ave, ssim_ave, mse_ave))
             if do_align:
-                self.logger.info('%s  PSNR(mean-aligned): %.3f  PSNRy(mean-aligned): %.3f  SSIM(mean-aligned): %.4f  LPIPS(mean-aligned): %.4f  MSE(mean-aligned): %.2f'
+                self.logger.info('%s  PSNR(mean-aligned): %.3f  PSNRy(mean-aligned): %.3f  SSIM(mean-aligned): %.4f  MSE(mean-aligned): %.2f'
                                  % (name, ap_psnr_rgb / cnt, ap_psnr / cnt, ap_ssim / cnt,
-                                    ap_lpips / cnt, ap_mse / cnt))
+                                    ap_mse / cnt))
 
             if name == 'data1':
                 self.data1_last_psnr = psnr_ave

@@ -75,13 +75,46 @@ class TTSREnhance(nn.Module):
         """Delegate to MainNet's reference illumination transfer (post-stitch)."""
         return self.MainNet.apply_ref_illum(x, low, ref)
 
+    def _dummy_ref_outputs(self, lr):
+        """Zero S/T placeholders with the shapes the trainer expects.
+
+        Only consumed by the transferal perceptual loss, which a no-reference
+        run does not use. VGG levels downsample by 2 per pooling step.
+        """
+        n = lr.size(0)
+        h1, w1 = lr.size()[-2:]
+        h2, w2 = h1 // 2, w1 // 2
+        h3, w3 = h2 // 2, w2 // 2
+
+        def z(c, h, w):
+            return lr.new_zeros(n, c, h, w)
+
+        return z(1, h3, w3), z(256, h3, w3), z(128, h2, w2), z(64, h1, w1)
+
     def forward(self, lr=None, lrsr=None, ref=None, refsr=None, sr=None,
-                return_ref=False, apply_illum=True, apply_ref_illum=True):
+                return_ref=False, apply_illum=True, apply_ref_illum=None,
+                use_reference=None):
         if (type(sr) != type(None)):
             # Used in transferal perceptual loss
             self.LTE_copy.load_state_dict(self.LTE.state_dict())
             sr_lv1, sr_lv2, sr_lv3 = self.LTE_copy((sr + 1.) / 2.)
             return sr_lv1, sr_lv2, sr_lv3
+
+        if apply_ref_illum is None:
+            apply_ref_illum = not getattr(self.args, 'no_ref_illum', False)
+
+        if use_reference is None:
+            use_reference = not getattr(self.args, 'no_reference', False)
+
+        if not use_reference:
+            # No-reference baseline: every reference-dependent path is off,
+            # including the reference illumination transfer.
+            sr = self.MainNet(lr, apply_illum=apply_illum, ref=None,
+                              apply_ref_illum=False, use_reference=False)
+            S, T_lv3, T_lv2, T_lv1 = self._dummy_ref_outputs(lr)
+            if return_ref:
+                return sr, S, T_lv3, T_lv2, T_lv1, None
+            return sr, S, T_lv3, T_lv2, T_lv1
 
         # Extract VGG features for search and texture transfer
         # lrsr/refsr are raw images at the same resolution (no bicubic needed)
@@ -98,12 +131,22 @@ class TTSREnhance(nn.Module):
         ref_lv1, ref_lv2, ref_lv3 = self.LTE((ref_input + 1.) / 2.)
 
         S, T_lv3, T_lv2, T_lv1 = self.SearchTransfer(
-            lrsr_lv3, refsr_lv3, ref_lv1, ref_lv2, ref_lv3)
+            lrsr_lv3, refsr_lv3, ref_lv1, ref_lv2, ref_lv3,
+            oracle_matching=getattr(self.args, 'oracle_matching', 'off'))
+
+        # Control experiment: RefIllumTransfer keeps its capacity and training
+        # schedule but receives a constant image instead of the reference, so
+        # its gain can be split into "extra correction capacity" vs
+        # "reference content". `ref` in MainNet is consumed ONLY by ref_illum.
+        illum_ref = ref_input
+        if getattr(self.args, 'ref_illum_const_ref', False):
+            illum_ref = torch.zeros_like(ref_input)
 
         # MainNetEnhance at 1:1 resolution
         sr = self.MainNet(lr, S, T_lv3, T_lv2, T_lv1,
-                          apply_illum=apply_illum, ref=ref_input,
-                          apply_ref_illum=apply_ref_illum)
+                          apply_illum=apply_illum, ref=illum_ref,
+                          apply_ref_illum=apply_ref_illum,
+                          use_reference=True)
 
         if return_ref:
             return sr, S, T_lv3, T_lv2, T_lv1, ref_input

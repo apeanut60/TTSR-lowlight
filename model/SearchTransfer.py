@@ -57,7 +57,8 @@ class SearchTransfer(nn.Module):
         index = index.view(views).expand(expanse)
         return torch.gather(input, dim, index)
 
-    def forward(self, lrsr_lv3, refsr_lv3, ref_lv1, ref_lv2, ref_lv3):
+    def forward(self, lrsr_lv3, refsr_lv3, ref_lv1, ref_lv2, ref_lv3,
+                oracle_matching='off'):
         """
         Args:
             lrsr_lv3: [N, C, H, W] features of low-light image (VGG lv3)
@@ -85,6 +86,22 @@ class SearchTransfer(nn.Module):
 
         R_lv3 = torch.bmm(refsr_lv3_unfold, lrsr_lv3_unfold)  # [N, Hr*Wr, H*W]
         R_lv3_star, R_lv3_star_arg = torch.max(R_lv3, dim=1)  # [N, H*W]
+
+        if oracle_matching != 'off':
+            # DIAGNOSTIC ONLY — never for deployment.
+            # Replace the learned argmax with the ground-truth correspondence.
+            # This is only meaningful when the reference is the aligned
+            # high-light image, so that reference cell j corresponds to
+            # low-light cell j (identity mapping).
+            #   'index' : swap only the transferred content T
+            #   'full'  : also swap the similarity that becomes S, so that
+            #             T and S stay consistent (recommended)
+            assert R_lv3.size(1) == R_lv3.size(2), \
+                'oracle matching assumes the reference and query share one grid'
+            ident = torch.arange(R_lv3.size(-1), device=R_lv3.device)
+            R_lv3_star_arg = ident.unsqueeze(0).expand(R_lv3.size(0), -1)
+            if oracle_matching == 'full':
+                R_lv3_star = R_lv3[:, ident, ident]
 
         # ═══ Transfer (adapted for 1:1 same resolution) ═══
         # VGG feature scales: lv3 @ H/4, lv2 @ H/2, lv1 @ H

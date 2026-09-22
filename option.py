@@ -25,6 +25,9 @@ parser.add_argument('--cpu', type=str2bool, default=False,
                     help='Use CPU to run code')
 parser.add_argument('--num_gpu', type=int, default=1,
                     help='The number of GPU used in training')
+parser.add_argument('--seed', type=int, default=-1,
+                    help='Random seed for torch/numpy/random. -1 disables seeding '
+                         '(use a fixed value when comparing ablations)')
 
 ### dataset setting
 parser.add_argument('--dataset', type=str, default='LOL',
@@ -82,6 +85,10 @@ parser.add_argument('--ref_correction', type=str2bool, default=True,
                     help='Add an always-on lightweight reference correction head before LTE')
 parser.add_argument('--ref_correction_feats', type=int, default=16,
                     help='Channel width of the reference correction head')
+parser.add_argument('--no_reference', type=str2bool, default=False,
+                    help='Disable EVERY reference-dependent path (texture search/transfer, '
+                         'reference illumination transfer and the correction head) to train or '
+                         'evaluate a no-reference baseline')
 parser.add_argument('--ref_correct_w', type=float, default=0.0,
                     help='Weight for auxiliary L1 loss between corrected ref and GT. 0 disables it')
 parser.add_argument('--eval_mean_align', type=str2bool, default=True,
@@ -93,6 +100,21 @@ parser.add_argument('--illum_match_factor', type=int, default=8,
                     help='Average-pool factor for the illumination matching loss')
 parser.add_argument('--ref_illum_pool', type=int, default=8,
                     help='Average-pool factor of the reference illumination transfer (low-frequency scale)')
+parser.add_argument('--no_ref_illum', type=str2bool, default=False,
+                    help='Disable the reference illumination transfer (RefIllumTransfer). The module is '
+                         'still constructed so the weight initialisation stays bit-identical to a run '
+                         'that keeps it; only its contribution to the output is removed.')
+parser.add_argument('--ref_illum_const_ref', type=str2bool, default=False,
+                    help='CONTROL EXPERIMENT: keep RefIllumTransfer fully intact (same capacity, same '
+                         'training) but feed it a constant (all-zero) image instead of the reference. '
+                         'Separates "extra low-frequency correction capacity" from "reference content".')
+parser.add_argument('--oracle_matching', type=str, default='off',
+                    choices=['off', 'index', 'full'],
+                    help='DIAGNOSTIC ONLY, never for deployment: replace the learned patch '
+                         'matching with the ground-truth correspondence (identity). Requires '
+                         'the reference to be the aligned high-light image. "index" swaps only '
+                         'the transferred content, "full" also swaps the similarity that '
+                         'becomes the gate S so that T and S stay consistent.')
 parser.add_argument('--eval_chroma_gain', type=float, default=1.0,
                     help='Scale chroma (Cb/Cr about neutral) of the evaluated prediction; '
                          '1.0 disables. Fixed colour calibration, never uses GT')
