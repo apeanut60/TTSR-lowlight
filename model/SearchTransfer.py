@@ -16,6 +16,32 @@ class SearchTransfer(nn.Module):
 
     def __init__(self):
         super(SearchTransfer, self).__init__()
+        # Coverage masks depend only on spatial size, so they are reused
+        # across calls. Kept in a plain dict (not a buffer) so the module
+        # still exposes an empty state_dict.
+        self._coverage_cache = {}
+
+    def _coverage(self, patches, out_h, out_w, kernel, padding, stride,
+                  device, dtype):
+        """Number of unfold windows covering each output pixel.
+
+        Returns ``[1, 1, out_h, out_w]``. Computed with a single channel and
+        a single sample: ``fold`` sums the k*k window dimension, and every
+        channel receives the same count, so the mask is identical for all
+        channels and batches — but the temporary tensor is C*N times smaller
+        than the ``ones_like(T_lv*_unfold)`` version it replaces.
+        """
+        key = (patches, out_h, out_w, kernel, padding, stride)
+        mask = self._coverage_cache.get(key)
+        if mask is None or mask.device != device or mask.dtype != dtype:
+            mask = F.fold(
+                torch.ones(1, kernel * kernel, patches,
+                           device=device, dtype=dtype),
+                output_size=(out_h, out_w),
+                kernel_size=(kernel, kernel),
+                padding=padding, stride=stride)
+            self._coverage_cache[key] = mask
+        return mask
 
     def bis(self, input, dim, index):
         # batch index select
@@ -79,28 +105,29 @@ class SearchTransfer(nn.Module):
         # Fold back to NATIVE resolution of each VGG level
         # lv1 @ H×W, lv2 @ H/2×W/2, lv3 @ H/4×W/4
         # MainNetEnhance will interpolate all to unified size via bicubic
-        # Use per-pixel normalization mask (fold of all-ones) instead of /k²
-        # because stride>1 creates uneven pixel coverage (2.2× variation)
+        # Divide by the per-pixel coverage count instead of /k²: overlapping
+        # windows plus the image border mean a pixel is covered 4~9 times
+        # (see `_coverage`), so a constant divisor would darken the edges.
         H2, W2 = H_out * 2, W_out * 2
         H1, W1 = H_out * 4, W_out * 4
 
         T_lv3 = F.fold(T_lv3_unfold, output_size=(H_out, W_out),
                        kernel_size=(3, 3), padding=1, stride=1)
-        norm_lv3 = F.fold(torch.ones_like(T_lv3_unfold), output_size=(H_out, W_out),
-                          kernel_size=(3, 3), padding=1, stride=1)
-        T_lv3 = T_lv3 / norm_lv3.clamp(min=1)
+        T_lv3 = T_lv3 / self._coverage(
+            T_lv3_unfold.shape[-1], H_out, W_out, 3, 1, 1,
+            T_lv3.device, T_lv3.dtype).clamp(min=1)
 
         T_lv2 = F.fold(T_lv2_unfold, output_size=(H2, W2),
                        kernel_size=(6, 6), padding=2, stride=2)
-        norm_lv2 = F.fold(torch.ones_like(T_lv2_unfold), output_size=(H2, W2),
-                          kernel_size=(6, 6), padding=2, stride=2)
-        T_lv2 = T_lv2 / norm_lv2.clamp(min=1)
+        T_lv2 = T_lv2 / self._coverage(
+            T_lv2_unfold.shape[-1], H2, W2, 6, 2, 2,
+            T_lv2.device, T_lv2.dtype).clamp(min=1)
 
         T_lv1 = F.fold(T_lv1_unfold, output_size=(H1, W1),
                        kernel_size=(12, 12), padding=4, stride=4)
-        norm_lv1 = F.fold(torch.ones_like(T_lv1_unfold), output_size=(H1, W1),
-                          kernel_size=(12, 12), padding=4, stride=4)
-        T_lv1 = T_lv1 / norm_lv1.clamp(min=1)
+        T_lv1 = T_lv1 / self._coverage(
+            T_lv1_unfold.shape[-1], H1, W1, 12, 4, 4,
+            T_lv1.device, T_lv1.dtype).clamp(min=1)
 
         S = R_lv3_star.view(R_lv3_star.size(0), 1, H_out, W_out)
 
