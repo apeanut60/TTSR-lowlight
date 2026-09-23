@@ -31,7 +31,12 @@ if __name__ == '__main__':
 
     ### dataloader of training set and testing set
     _dataloader = dataloader.get_dataloader(args) if (not args.test) else None
-    if (_dataloader is not None and (not args.test) and (not args.eval)):
+    # Extra eval loaders (generated-reference test sets) are injected for
+    # training AND for --eval runs, so a standalone evaluation of a checkpoint
+    # reports the same full set of reference settings that training validation
+    # does. `_dataloader is None` already covers --test, so no test/eval flag is
+    # needed here. Each add_* helper is internally guarded by its own option.
+    if (_dataloader is not None):
         if (args.dataset.lower() == 'mixed_lolv2_data1'):
             dataloader.add_mixed_eval(args, _dataloader)
             if getattr(args, 'eval_lolv2real_gt', False):
