@@ -82,6 +82,23 @@ parser.add_argument('--texture_lv3_only', type=str2bool, default=False,
                          'injections. Lets a backbone swap be separated from a change of the '
                          'texture injection topology. Ignored by the retinexformer backbone, '
                          'which injects T_lv3 only by construction.')
+parser.add_argument('--adapter_only', type=str2bool, default=False,
+                    help='Freeze the whole network except the H/4 texture adapter (A3) and '
+                         'train only those ~0.30M parameters. Uses a step-based budget '
+                         '(--adapter_steps) instead of epochs. Requires --adapter_base_ckpt.')
+parser.add_argument('--adapter_base_ckpt', type=str, default='',
+                    help='Checkpoint loaded as the frozen base for --adapter_only '
+                         '(e.g. the full-data N0 ep40). Must exist; no fallback.')
+parser.add_argument('--adapter_steps', type=int, default=3000,
+                    help='Optimizer updates for --adapter_only')
+parser.add_argument('--adapter_lr', type=float, default=1e-4,
+                    help='Adapter LR before the drop')
+parser.add_argument('--adapter_lr_drop_step', type=int, default=2000,
+                    help='LR is halved once this many updates have completed')
+parser.add_argument('--adapter_lr_after_drop', type=float, default=5e-5,
+                    help='Adapter LR after the drop')
+parser.add_argument('--adapter_eval_every', type=int, default=1000,
+                    help='Run a full evaluation every N adapter updates (step 0 always runs)')
 parser.add_argument('--no_global_illum', type=str2bool, default=False,
                     help='Disable GlobalIllumHead entirely (not constructed, so it adds no '
                          'parameters and no post-processing step)')

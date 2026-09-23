@@ -80,6 +80,29 @@ if __name__ == '__main__':
                 _model, args.freeze_stages, args.num_gpu)
             _logger.info('Frozen MainNet stages: %s; frozen parameter count: %d'
                          % (args.freeze_stages, len(frozen_names)))
+        if getattr(args, 'adapter_only', False):
+            # Freeze everything, then re-enable ONLY the H/4 texture adapter.
+            # The Trainer builds its param groups afterwards, so the optimizer
+            # ends up holding nothing but the adapter.
+            base = getattr(args, 'adapter_base_ckpt', '')
+            if (not base) or (not os.path.isfile(base)):
+                raise SystemExit(
+                    '--adapter_only requires an existing --adapter_base_ckpt '
+                    '(got %r)' % base)
+            _logger.info('adapter-only base checkpoint: ' + base)
+            _model = TTSREnhance.load_pretrained_weights(_model, base, device)
+            _net = _model.module if hasattr(_model, 'module') else _model
+            _net.requires_grad_(False)
+            _adapter = _net.MainNet.denoiser.ref_adapter
+            _adapter.requires_grad_(True)
+            _trainable = [n for n, p in _net.named_parameters() if p.requires_grad]
+            if (not _trainable) or any('ref_adapter' not in n for n in _trainable):
+                raise SystemExit('adapter-only: unexpected trainable set %s'
+                                 % _trainable[:8])
+            _logger.info('adapter-only: %d trainable tensors, all under '
+                         'MainNet.denoiser.ref_adapter (%d params)'
+                         % (len(_trainable),
+                            sum(p.numel() for p in _adapter.parameters())))
         # Save the freshly constructed weights so a later ablation arm can
         # share a *verified* initialisation instead of relying on the seed
         # reproducing the same construction order. Load it with
@@ -113,6 +136,8 @@ if __name__ == '__main__':
     elif (args.eval):
         t.load(model_path=args.model_path)
         t.evaluate()
+    elif getattr(args, 'adapter_only', False):
+        t.train_adapter_only()
     else:
         for epoch in range(1, args.num_init_epochs+1):
             t.train(current_epoch=epoch, is_init=True)

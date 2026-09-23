@@ -417,6 +417,149 @@ class Trainer():
         torch.save(model_state_dict, model_name)
         return model_name
 
+    def _lowlight_loss(self, sr, hr):
+        """The shared low-light objective.
+
+        Mirrors the non-init branch of ``train`` exactly (same terms, same
+        weights, same order of accumulation) so an adapter-only run optimises
+        precisely what a full run would. Returns (total, {name: weighted value}).
+        """
+        parts = {}
+        total = self.args.rec_w * self.loss_all['rec_loss'](sr, hr)
+        parts['rec_loss'] = float(total.detach())
+        if ('per_loss' in self.loss_all):
+            sr_relu5_1 = self.vgg19((sr + 1.) / 2.)
+            with torch.no_grad():
+                hr_relu5_1 = self.vgg19((hr.detach() + 1.) / 2.)
+            l = self.args.per_w * self.loss_all['per_loss'](sr_relu5_1, hr_relu5_1)
+            total = total + l
+            parts['per_loss'] = float(l.detach())
+        if ('illum_smooth_loss' in self.loss_all):
+            l = self.args.illum_smooth_w * self.loss_all['illum_smooth_loss'](sr)
+            total = total + l
+            parts['illum_smooth_loss'] = float(l.detach())
+        if ('color_loss' in self.loss_all):
+            l = self.args.color_w * self.loss_all['color_loss'](sr)
+            total = total + l
+            parts['color_loss'] = float(l.detach())
+        if ('exposure_loss' in self.loss_all):
+            l = self.args.exposure_w * self.loss_all['exposure_loss'](sr)
+            total = total + l
+            parts['exposure_loss'] = float(l.detach())
+        if ('illum_match_loss' in self.loss_all):
+            l = self.args.illum_match_w * self.loss_all['illum_match_loss'](sr, hr)
+            total = total + l
+            parts['illum_match_loss'] = float(l.detach())
+        return total, parts
+
+    def save_adapter(self, step, tag=None):
+        """Save the adapter alone plus a full model, both keyed by optimizer step."""
+        wrapped = self.model.module if hasattr(self.model, 'module') else self.model
+        adapter = wrapped.MainNet.denoiser.ref_adapter
+        model_dir = os.path.join(self.args.save_dir, 'model')
+        os.makedirs(model_dir, exist_ok=True)
+        suffix = str(step).zfill(5) + ('' if tag is None else '_' + tag)
+        a_path = os.path.join(model_dir, 'adapter_' + suffix + '.pt')
+        torch.save(adapter.state_dict(), a_path)
+        m_path = self.save(step)
+        self.logger.info('saved adapter %s and model %s' % (a_path, m_path))
+        return a_path, m_path
+
+    def train_adapter_only(self):
+        """Step-based training of the H/4 texture adapter only.
+
+        Everything else has requires_grad=False and is absent from the
+        optimizer, but gradients still flow *through* the frozen network so the
+        adapter is optimised against the real reconstruction objective (plan
+        section B2: freezing parameters is not the same as disabling autograd).
+        """
+        args = self.args
+        total_steps = int(getattr(args, 'adapter_steps', 3000))
+        drop_step = int(getattr(args, 'adapter_lr_drop_step', 2000))
+        lr_hi = float(getattr(args, 'adapter_lr', args.lr_rate))
+        lr_lo = float(getattr(args, 'adapter_lr_after_drop', 5e-5))
+        eval_every = int(getattr(args, 'adapter_eval_every', 1000))
+        print_every = max(1, int(getattr(args, 'print_every', 100)))
+
+        wrapped = self.model.module if hasattr(self.model, 'module') else self.model
+        adapter = wrapped.MainNet.denoiser.ref_adapter
+        ada_params = [p for p in adapter.parameters() if p.requires_grad]
+        if not ada_params:
+            raise RuntimeError('adapter-only mode but the adapter has no '
+                               'trainable parameters')
+        n_train = sum(p.numel() for p in ada_params)
+        n_opt = sum(p.numel() for g in self.optimizer.param_groups
+                    for p in g['params'])
+        self.logger.info('adapter-only: %d tensors / %d params trainable; '
+                         'optimizer holds %d params'
+                         % (len(ada_params), n_train, n_opt))
+        if n_opt != n_train:
+            raise RuntimeError('optimizer holds %d params but the adapter has %d '
+                               '— only the adapter may be trained here'
+                               % (n_opt, n_train))
+
+        # Snapshot the frozen tensors so we can prove they never moved.
+        frozen = {n: p.detach().clone() for n, p in wrapped.named_parameters()
+                  if not p.requires_grad}
+
+        self.model.eval()          # no Dropout/BN here, but keep the intent
+        adapter.train()
+
+        loader = self.dataloader['train']
+
+        def batches():
+            while True:
+                for b in loader:
+                    yield b
+
+        self.logger.info('adapter-only: evaluating the base model at step 0')
+        self.evaluate(current_epoch=0)
+        self.save_adapter(0)
+
+        step = 0
+        for sample_batched in batches():
+            if step >= total_steps:
+                break
+            step += 1
+            lr = lr_hi if step <= drop_step else lr_lo
+            for g in self.optimizer.param_groups:
+                g['lr'] = lr
+
+            sample_batched = self.prepare(sample_batched)
+            lr_in = sample_batched['LR']
+            hr = sample_batched['HR']
+            sr = self.model(lr=lr_in, lrsr=sample_batched['LR_sr'],
+                            ref=sample_batched['Ref'],
+                            refsr=sample_batched['Ref_sr'])[0]
+            loss, parts = self._lowlight_loss(sr, hr)
+            self.optimizer.zero_grad(set_to_none=True)
+            loss.backward()
+            gnorm = float(torch.sqrt(sum(
+                (p.grad.detach() ** 2).sum() for p in ada_params
+                if p.grad is not None)))
+            self.optimizer.step()
+
+            if step % print_every == 0 or step == 1:
+                self.logger.info(
+                    'adapter step %d/%d lr=%.2e loss=%.6f |grad|=%.3e %s'
+                    % (step, total_steps, lr, float(loss.detach()), gnorm,
+                       ' '.join('%s=%.5f' % (k, v) for k, v in parts.items())))
+
+            if step % eval_every == 0 or step == total_steps:
+                self.model.eval()
+                self.evaluate(current_epoch=step)
+                self.save_adapter(step)
+                adapter.train()
+
+        moved = [n for n, p in wrapped.named_parameters()
+                 if not p.requires_grad and not torch.equal(frozen[n], p)]
+        if moved:
+            raise RuntimeError('frozen parameters changed during adapter-only '
+                               'training: %s' % moved[:5])
+        self.logger.info('adapter-only: all %d frozen tensors are bit-identical '
+                         'to the starting point' % len(frozen))
+        return step
+
     def evaluate(self, current_epoch=0):
         self.logger.info('Epoch ' + str(current_epoch) + ' evaluation process...')
 
