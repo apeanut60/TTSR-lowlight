@@ -3,17 +3,48 @@ from importlib import import_module
 import argparse
 
 
+def _worker_init(worker_id):
+    """Pin every DataLoader worker to a single compute thread.
+
+    The container reports ``nproc == 128`` but is limited by a cgroup quota of
+    10 CPUs (``cpu.max = 1000000 100000``). OpenCV and PyTorch size their
+    thread pools from ``nproc``, so each worker was spawning 128 OpenCV threads
+    — 8 workers x 128 threads competing for 10 CPUs. Measured effect on the
+    data1 train loader (batch 8, 8 workers):
+
+        default (128 threads/worker) : 240 ms/batch
+        one thread per worker        :  15 ms/batch     (15.6x faster)
+
+    and the worker count then scales cleanly (8/4/2 workers -> 15/32/65 ms).
+    Without this the loader is slower than the training step itself, which is
+    why the GPU sat idle over half the time.
+
+    It deliberately does NOT seed anything: seeding stays the caller's job so
+    that existing `--seed` behaviour is unchanged.
+    """
+    try:
+        import cv2
+        cv2.setNumThreads(1)
+    except Exception:
+        pass
+    try:
+        import torch
+        torch.set_num_threads(1)
+    except Exception:
+        pass
+
+
 def get_dataloader(args):
     ### import module
     m = import_module('dataset.' + args.dataset.lower())
 
     if (args.dataset == 'CUFED'):
         data_train = getattr(m, 'TrainSet')(args)
-        dataloader_train = DataLoader(data_train, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers)
+        dataloader_train = DataLoader(data_train, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers, worker_init_fn=_worker_init)
         dataloader_test = {}
         for i in range(5):
             data_test = getattr(m, 'TestSet')(args=_test_args(args), ref_level=str(i+1))
-            dataloader_test[str(i+1)] = DataLoader(data_test, batch_size=1, shuffle=False, num_workers=args.num_workers)
+            dataloader_test[str(i+1)] = DataLoader(data_test, batch_size=1, shuffle=False, num_workers=args.num_workers, worker_init_fn=_worker_init)
         dataloader = {'train': dataloader_train, 'test': dataloader_test}
 
     elif (args.dataset in ['LOL', 'data1', 'data2', 'data1_nanobanana',
@@ -24,11 +55,11 @@ def get_dataloader(args):
                            'mixed_data1_nanobanana_lolv2']):
         data_train = getattr(m, 'TrainSet')(args)
         if len(data_train) > 0:
-            dataloader_train = DataLoader(data_train, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers)
+            dataloader_train = DataLoader(data_train, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers, worker_init_fn=_worker_init)
         else:
             dataloader_train = None
         data_test = getattr(m, 'TestSet')(args=_test_args(args), ref_level='1')
-        dataloader_test = {'1': DataLoader(data_test, batch_size=1, shuffle=False, num_workers=args.num_workers)}
+        dataloader_test = {'1': DataLoader(data_test, batch_size=1, shuffle=False, num_workers=args.num_workers, worker_init_fn=_worker_init)}
         dataloader = {'train': dataloader_train, 'test': dataloader_test}
 
     else:
@@ -69,7 +100,7 @@ def _build_test_loader(args, dataset_name, dataset_dir, camera='all', ref_dir=''
     m = import_module('dataset.' + dataset_name)
     data_test = getattr(m, 'TestSet')(args=test_args, ref_level='1')
     return DataLoader(data_test, batch_size=1, shuffle=False,
-                      num_workers=getattr(args, 'num_workers', 0))
+                      num_workers=getattr(args, 'num_workers', 0), worker_init_fn=_worker_init)
 
 
 def add_mixed_eval(args, dataloader):
@@ -111,7 +142,7 @@ def add_data1_nanobanana_eval(args, dataloader):
         m = import_module('dataset.data1')
         data_test = getattr(m, 'TestSet')(args=data1_args, ref_level='1')
         loader = DataLoader(data_test, batch_size=1, shuffle=False,
-                            num_workers=getattr(args, 'num_workers', 0))
+                            num_workers=getattr(args, 'num_workers', 0), worker_init_fn=_worker_init)
         dataloader['extra_test'][key] = loader
 
     return dataloader
@@ -158,7 +189,7 @@ def add_lolv2_nanobanana_eval(args, dataloader):
         data_test = getattr(m, 'TestSet')(args=test_args, ref_level='1')
         dataloader['extra_test'][key] = DataLoader(
             data_test, batch_size=1, shuffle=False,
-            num_workers=getattr(args, 'num_workers', 0))
+            num_workers=getattr(args, 'num_workers', 0), worker_init_fn=_worker_init)
 
     return dataloader
 
@@ -197,7 +228,7 @@ def add_lolv2_nanobanana_eval_subset(args, dataloader, subset):
     data_test = getattr(m, 'TestSet')(args=test_args, ref_level='1')
     dataloader['extra_test'][key] = DataLoader(
         data_test, batch_size=1, shuffle=False,
-        num_workers=getattr(args, 'num_workers', 0))
+        num_workers=getattr(args, 'num_workers', 0), worker_init_fn=_worker_init)
     return dataloader
 
 
@@ -224,7 +255,7 @@ def add_lol_nanobanana_eval(args, dataloader):
     data_test = getattr(m, 'TestSet')(args=test_args, ref_level='1')
     dataloader['extra_test']['lol_nanobanana'] = DataLoader(
         data_test, batch_size=1, shuffle=False,
-        num_workers=getattr(args, 'num_workers', 0))
+        num_workers=getattr(args, 'num_workers', 0), worker_init_fn=_worker_init)
     return dataloader
 
 
@@ -246,7 +277,7 @@ def add_lolv2real_gt_eval(args, dataloader):
     data_test = getattr(m, 'TestSet')(args=test_args, ref_level='1')
     dataloader['extra_test']['lolv2real_gt'] = DataLoader(
         data_test, batch_size=1, shuffle=False,
-        num_workers=getattr(args, 'num_workers', 0))
+        num_workers=getattr(args, 'num_workers', 0), worker_init_fn=_worker_init)
     return dataloader
 
 

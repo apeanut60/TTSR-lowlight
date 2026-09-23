@@ -167,6 +167,9 @@ parser.add_argument('--mixed_weights_4', type=str, default='2,3,1,1',
                     help='Sampling weights for data1_gt,data1_nanobanana,lolv2real,lolv2syn')
 parser.add_argument('--nanobanana_ref_subdir', type=str, default='nanobanana_ref',
                     help='Subdirectory name for nanobanana refs inside data1 camera folders')
+parser.add_argument('--train_manifest_dir', type=str, default='',
+                    help='Restrict data1 TrainSet to the samples listed in '
+                         '<dir>/<camera>.txt (matched-subset ablation). Empty = full set')
 parser.add_argument('--nanobanana_manifest_dir', type=str,
                     default='/root/data/datasets/data1/.nanobanana_sample_manifest',
                     help='Directory containing Huawei.txt / Nikon.txt manifest files for the 250-sample subset')

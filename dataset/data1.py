@@ -142,6 +142,30 @@ def _collect_pairs(base_dir, camera_filter='all'):
     return pairs
 
 
+def _restrict_to_manifest(pairs, manifest_dir):
+    """Keep only samples listed in ``<manifest_dir>/<camera>.txt``.
+
+    Matching is by low-image basename within each camera, mirroring how
+    ``data1_nanobanana._collect_triplets`` consumes the same manifests. A
+    camera with no manifest file contributes nothing, so the result is a strict
+    subset rather than a silent fallback to the full set.
+    """
+    allowed = {}
+    for name in sorted(os.listdir(manifest_dir)):
+        if not name.endswith('.txt'):
+            continue
+        with open(os.path.join(manifest_dir, name), encoding='utf-8') as f:
+            allowed[name[:-4]] = {os.path.basename(line.strip())
+                                  for line in f if line.strip()}
+    out = []
+    for low_path, high_path in pairs:
+        camera = os.path.basename(os.path.dirname(os.path.dirname(low_path)))
+        names = allowed.get(camera)
+        if names is not None and os.path.basename(low_path) in names:
+            out.append((low_path, high_path))
+    return out
+
+
 class TrainSet(Dataset):
     def __init__(self, args, transform=None):
         if transform is None:
@@ -155,6 +179,15 @@ class TrainSet(Dataset):
                 blur_sigma=getattr(args, 'ref_blur_sigma', 2.0))
         self.transform = transform
         self.pairs = _collect_pairs(os.path.join(args.dataset_dir, 'Training data'))
+        # Optional matched-subset restriction. This exists so an ablation can
+        # swap ONLY the reference source while training on an identical sample
+        # list (e.g. comparing HR-crop references against the generated
+        # references, which only exist for a subset of the training set).
+        manifest_dir = getattr(args, 'train_manifest_dir', '')
+        if manifest_dir:
+            self.pairs = _restrict_to_manifest(self.pairs, manifest_dir)
+            print('[TrainSet] train_manifest_dir=%s -> %d pairs'
+                  % (manifest_dir, len(self.pairs)))
 
     def __len__(self):
         return len(self.pairs)
