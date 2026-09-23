@@ -80,6 +80,16 @@ if __name__ == '__main__':
                 _model, args.freeze_stages, args.num_gpu)
             _logger.info('Frozen MainNet stages: %s; frozen parameter count: %d'
                          % (args.freeze_stages, len(frozen_names)))
+        # Save the freshly constructed weights so a later ablation arm can
+        # share a *verified* initialisation instead of relying on the seed
+        # reproducing the same construction order. Load it with
+        # `--load_pretrain True --pretrain_path <dir>/model/init.pt`.
+        if (not args.test) and (not args.eval):
+            _init_path = os.path.join(args.save_dir, 'model', 'init.pt')
+            if not os.path.exists(_init_path):
+                os.makedirs(os.path.dirname(_init_path), exist_ok=True)
+                torch.save(_model.state_dict(), _init_path)
+                _logger.info('Saved initial weights to ' + _init_path)
     else:
         _model = TTSR.TTSR(args).to(device)
         _logger.info('Using TTSR model (4x super-resolution mode)')
