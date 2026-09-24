@@ -12,6 +12,65 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 import torchvision.utils as utils
+
+
+# Training arms for the step-budget entry point. Each entry maps a group name
+# to (parameter-name prefixes, LR knob, post-drop LR knob). Prefixes are
+# relative to the TTSREnhance model, so they start with "MainNet.".
+# `decoder_layers.1` is the LAST of the two decoder stages for level=2
+# (H/2 -> H upsample, the skip fusion conv and that stage's IGAB);
+# `mapping` is the output projection.
+TRAIN_ARMS = {
+    'adapter': [
+        ('adapter', ('MainNet.denoiser.ref_adapter.',),
+         'adapter_lr', 'adapter_lr_after_drop'),
+    ],
+    'decoder_tail': [
+        ('tail', ('MainNet.denoiser.decoder_layers.1.',
+                  'MainNet.denoiser.mapping.'),
+         'tail_lr', 'tail_lr_after_drop'),
+    ],
+    'decoder_tail_texture': [
+        ('tail', ('MainNet.denoiser.decoder_layers.1.',
+                  'MainNet.denoiser.mapping.'),
+         'tail_lr', 'tail_lr_after_drop'),
+        ('adapter', ('MainNet.denoiser.ref_adapter.',),
+         'adapter_lr', 'adapter_lr_after_drop'),
+    ],
+}
+
+
+def resolve_train_arm(model, arm):
+    """Freeze everything, re-enable the arm's whitelist, return its groups.
+
+    Returns a list of (group_name, [params]). Raises if the whitelist matches
+    nothing, or if one parameter would land in two groups.
+    """
+    if arm not in TRAIN_ARMS:
+        raise ValueError('unknown train arm %r' % arm)
+    net = model.module if hasattr(model, 'module') else model
+    net.requires_grad_(False)
+    groups = []
+    assigned = {}
+    for name, prefixes, _before_key, _after_key in TRAIN_ARMS[arm]:
+        params = []
+        for pname, p in net.named_parameters():
+            if not any(pname.startswith(x) for x in prefixes):
+                continue
+            if pname in assigned:
+                raise RuntimeError('%s already in group %s'
+                                   % (pname, assigned[pname]))
+            assigned[pname] = name
+            p.requires_grad_(True)
+            params.append(p)
+        if not params:
+            raise RuntimeError('train arm %r: prefix %s matched no parameters '
+                               '— check the architecture'
+                               % (arm, prefixes))
+        groups.append((name, params))
+    return groups
+
+
 class Trainer():
     @staticmethod
     def freeze_mainnet_stages(model, freeze_stages, num_gpu=1):
@@ -109,18 +168,43 @@ class Trainer():
             lr_refillum = args.lr_rate
 
         self.params = []
-        if other_mainnet_params:
-            self.params.append({"params": other_mainnet_params, "lr": args.lr_rate})
-        if stage2_params:
-            self.params.append({"params": stage2_params, "lr": lr_stage2})
-        if ref_head_params:
-            self.params.append({"params": ref_head_params, "lr": lr_refhead})
-        if illum_params:
-            self.params.append({"params": illum_params, "lr": lr_illum})
-        if refillum_params:
-            self.params.append({"params": refillum_params, "lr": lr_refillum})
-        if lte_params:
-            self.params.append({"params": lte_params, "lr": args.lr_rate_lte})
+        # Step-budget arms (plan "decoder + texture paired verification")
+        # replace the epoch-based grouping with an explicit whitelist and
+        # per-group LRs.
+        self.group_lrs = []
+        arm = getattr(args, 'train_arm', 'none')
+        if arm != 'none':
+            for name, prefixes, before_key, after_key in TRAIN_ARMS[arm]:
+                # Names are relative to the TTSREnhance model (the same space
+                # TRAIN_ARMS prefixes and resolve_train_arm use), not to MainNet.
+                ps = [p for n, p in wrapped.named_parameters()
+                      if p.requires_grad
+                      and any(n.startswith(x) for x in prefixes)]
+                if not ps:
+                    raise RuntimeError(
+                        'train arm %r group %r matched no trainable parameters'
+                        % (arm, name))
+                lr_b = float(getattr(args, before_key))
+                lr_a = float(getattr(args, after_key))
+                self.params.append({"params": ps, "lr": lr_b})
+                self.group_lrs.append((name, lr_b, lr_a))
+                self.logger.info('arm %s group %s: %d tensors, %d params, '
+                                 'lr %g -> %g'
+                                 % (arm, name, len(ps),
+                                    sum(p.numel() for p in ps), lr_b, lr_a))
+        else:
+            if other_mainnet_params:
+                self.params.append({"params": other_mainnet_params, "lr": args.lr_rate})
+            if stage2_params:
+                self.params.append({"params": stage2_params, "lr": lr_stage2})
+            if ref_head_params:
+                self.params.append({"params": ref_head_params, "lr": lr_refhead})
+            if illum_params:
+                self.params.append({"params": illum_params, "lr": lr_illum})
+            if refillum_params:
+                self.params.append({"params": refillum_params, "lr": lr_refillum})
+            if lte_params:
+                self.params.append({"params": lte_params, "lr": args.lr_rate_lte})
         if not self.params:
             raise RuntimeError('No trainable parameters remain after freezing')
 
@@ -242,6 +326,13 @@ class Trainer():
         net = self.model.module if hasattr(self.model, 'module') else self.model
         has_illum = hasattr(net, 'apply_illum_head')
         has_refillum = hasattr(net, 'apply_ref_illum')
+        # The delegate methods do not resolve the disable switches themselves,
+        # so without this the post-stitch step would ignore --no_ref_illum /
+        # --no_global_illum and run even when the ablation asked for them off.
+        if hasattr(net, 'illum_enabled'):
+            do_illum, do_refillum = net.illum_enabled()
+        else:
+            do_illum, do_refillum = True, True
 
         for i_h in range(n_h):
             y0 = min(i_h * stride, H - tile_size)
@@ -268,9 +359,9 @@ class Trainer():
                 last_S, last_T3, last_T2, last_T1 = S, T3, T2, T1
 
         sr = sr_accum / weight_accum.clamp(min=1e-8)
-        if has_refillum:
+        if has_refillum and do_refillum:
             sr = net.apply_ref_illum(sr, lr, ref)
-        if has_illum:
+        if has_illum and do_illum:
             sr = net.apply_illum_head(sr, lr)
         return sr, last_S, last_T3, last_T2, last_T1
 
@@ -465,45 +556,61 @@ class Trainer():
         self.logger.info('saved adapter %s and model %s' % (a_path, m_path))
         return a_path, m_path
 
-    def train_adapter_only(self):
-        """Step-based training of the H/4 texture adapter only.
+    def train_step_budget(self):
+        """Step-budget training of an explicit arm (see TRAIN_ARMS).
 
-        Everything else has requires_grad=False and is absent from the
-        optimizer, but gradients still flow *through* the frozen network so the
-        adapter is optimised against the real reconstruction objective (plan
-        section B2: freezing parameters is not the same as disabling autograd).
+        Only the arm's whitelist is trainable and present in the optimizer, but
+        gradients still flow *through* the frozen modules, so the arm is
+        optimised against the real reconstruction objective (plan section B3:
+        freezing parameters is not the same as disabling autograd).
         """
         args = self.args
-        total_steps = int(getattr(args, 'adapter_steps', 3000))
-        drop_step = int(getattr(args, 'adapter_lr_drop_step', 2000))
-        lr_hi = float(getattr(args, 'adapter_lr', args.lr_rate))
-        lr_lo = float(getattr(args, 'adapter_lr_after_drop', 5e-5))
-        eval_every = int(getattr(args, 'adapter_eval_every', 1000))
+        arm = getattr(args, 'train_arm', 'adapter')
+        total_steps = int(getattr(args, 'train_steps', 0)
+                          or getattr(args, 'adapter_steps', 3000))
+        drop_step = int(getattr(args, 'train_lr_drop_step', 2000))
+        eval_every = int(getattr(args, 'train_eval_every', 1000))
         print_every = max(1, int(getattr(args, 'print_every', 100)))
 
         wrapped = self.model.module if hasattr(self.model, 'module') else self.model
-        adapter = wrapped.MainNet.denoiser.ref_adapter
-        ada_params = [p for p in adapter.parameters() if p.requires_grad]
-        if not ada_params:
-            raise RuntimeError('adapter-only mode but the adapter has no '
-                               'trainable parameters')
-        n_train = sum(p.numel() for p in ada_params)
+        trainable = [p for p in wrapped.parameters() if p.requires_grad]
+        n_train = sum(p.numel() for p in trainable)
         n_opt = sum(p.numel() for g in self.optimizer.param_groups
                     for p in g['params'])
-        self.logger.info('adapter-only: %d tensors / %d params trainable; '
-                         'optimizer holds %d params'
-                         % (len(ada_params), n_train, n_opt))
+        self.logger.info('arm %s: %d trainable tensors / %d params; optimizer '
+                         'holds %d params in %d groups'
+                         % (arm, len(trainable), n_train, n_opt,
+                            len(self.optimizer.param_groups)))
         if n_opt != n_train:
-            raise RuntimeError('optimizer holds %d params but the adapter has %d '
-                               '— only the adapter may be trained here'
-                               % (n_opt, n_train))
+            raise RuntimeError('optimizer holds %d params but arm %s has %d '
+                               'trainable — the sets must match exactly'
+                               % (n_opt, arm, n_train))
+        ids = [id(p) for g in self.optimizer.param_groups for p in g['params']]
+        if len(ids) != len(set(ids)):
+            raise RuntimeError('a parameter appears in two optimizer groups')
+        for (name, _b, _a), grp in zip(self.group_lrs, self.optimizer.param_groups):
+            self.logger.info('  group %s: %d tensors' % (name, len(grp['params'])))
 
-        # Snapshot the frozen tensors so we can prove they never moved.
+        self.model.eval()
+        for m in wrapped.modules():
+            if any(m is p for p in trainable):
+                pass
+        # Put exactly the arm's modules in train mode (harmless here: this
+        # backbone has only LayerNorm, no Dropout/BatchNorm).
+        for name, _b, _a in self.group_lrs:
+            prefixes = TRAIN_ARMS[arm][[g[0] for g in TRAIN_ARMS[arm]].index(name)][1]
+            for mname, mod in wrapped.named_modules():
+                if any(mname.startswith(x.rstrip('.')) for x in prefixes):
+                    mod.train()
+
+        # Frozen set = everything outside the arm whitelist (plan section E2:
+        # do NOT reuse the previous round's fixed "152 tensors" count).
+        train_ids = {id(p) for p in trainable}
         frozen = {n: p.detach().clone() for n, p in wrapped.named_parameters()
-                  if not p.requires_grad}
-
-        self.model.eval()          # no Dropout/BN here, but keep the intent
-        adapter.train()
+                  if id(p) not in train_ids}
+        buf = {n: b.detach().clone() for n, b in wrapped.named_buffers()}
+        self.logger.info('checking %d frozen tensors and %d buffers'
+                         % (len(frozen), len(buf)))
 
         loader = self.dataloader['train']
 
@@ -512,7 +619,7 @@ class Trainer():
                 for b in loader:
                     yield b
 
-        self.logger.info('adapter-only: evaluating the base model at step 0')
+        self.logger.info('arm %s: evaluating the starting point (step 0)' % arm)
         self.evaluate(current_epoch=0)
         self.save_adapter(0)
 
@@ -521,44 +628,62 @@ class Trainer():
             if step >= total_steps:
                 break
             step += 1
-            lr = lr_hi if step <= drop_step else lr_lo
-            for g in self.optimizer.param_groups:
+            lrs = [(b if step <= drop_step else a)
+                   for _n, b, a in self.group_lrs]
+            for g, lr in zip(self.optimizer.param_groups, lrs):
                 g['lr'] = lr
 
             sample_batched = self.prepare(sample_batched)
-            lr_in = sample_batched['LR']
-            hr = sample_batched['HR']
-            sr = self.model(lr=lr_in, lrsr=sample_batched['LR_sr'],
+            sr = self.model(lr=sample_batched['LR'],
+                            lrsr=sample_batched['LR_sr'],
                             ref=sample_batched['Ref'],
                             refsr=sample_batched['Ref_sr'])[0]
-            loss, parts = self._lowlight_loss(sr, hr)
+            loss, parts = self._lowlight_loss(sr, sample_batched['HR'])
             self.optimizer.zero_grad(set_to_none=True)
             loss.backward()
-            gnorm = float(torch.sqrt(sum(
-                (p.grad.detach() ** 2).sum() for p in ada_params
-                if p.grad is not None)))
+            gnorms = [float(torch.sqrt(sum(
+                (p.grad.detach() ** 2).sum() for p in g['params']
+                if p.grad is not None))) for g in self.optimizer.param_groups]
             self.optimizer.step()
 
             if step % print_every == 0 or step == 1:
                 self.logger.info(
-                    'adapter step %d/%d lr=%.2e loss=%.6f |grad|=%.3e %s'
-                    % (step, total_steps, lr, float(loss.detach()), gnorm,
+                    'arm %s step %d/%d lr=%s loss=%.6f |grad|=%s %s'
+                    % (arm, step, total_steps,
+                       '/'.join('%.2e' % v for v in lrs),
+                       float(loss.detach()),
+                       '/'.join('%.2e' % v for v in gnorms),
                        ' '.join('%s=%.5f' % (k, v) for k, v in parts.items())))
+            if step in (drop_step - 1, drop_step, drop_step + 1,
+                        drop_step + 2):
+                self.logger.info('  LR check at update %d: %s'
+                                 % (step, lrs))
 
             if step % eval_every == 0 or step == total_steps:
                 self.model.eval()
+                for name, _b, _a in self.group_lrs:
+                    prefixes = TRAIN_ARMS[arm][[g[0] for g in TRAIN_ARMS[arm]].index(name)][1]
+                    for mname, mod in wrapped.named_modules():
+                        if any(mname.startswith(x.rstrip('.')) for x in prefixes):
+                            mod.train()
                 self.evaluate(current_epoch=step)
                 self.save_adapter(step)
-                adapter.train()
 
         moved = [n for n, p in wrapped.named_parameters()
-                 if not p.requires_grad and not torch.equal(frozen[n], p)]
+                 if id(p) not in train_ids and not torch.equal(frozen[n], p)]
+        moved += [n for n, b in wrapped.named_buffers()
+                  if n in buf and not torch.equal(buf[n], b)]
         if moved:
-            raise RuntimeError('frozen parameters changed during adapter-only '
-                               'training: %s' % moved[:5])
-        self.logger.info('adapter-only: all %d frozen tensors are bit-identical '
-                         'to the starting point' % len(frozen))
+            raise RuntimeError('frozen tensors changed during arm %s training: %s'
+                               % (arm, moved[:5]))
+        self.logger.info('arm %s: all %d frozen tensors and %d buffers are '
+                         'bit-identical to the starting point'
+                         % (arm, len(frozen), len(buf)))
         return step
+
+    def train_adapter_only(self):
+        """Back-compat alias for the adapter-only arm."""
+        return self.train_step_budget()
 
     def evaluate(self, current_epoch=0):
         self.logger.info('Epoch ' + str(current_epoch) + ' evaluation process...')

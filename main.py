@@ -4,7 +4,7 @@ from dataset import dataloader
 from model import TTSR, TTSREnhance
 from loss.loss import get_loss_dict
 from loss.loss_enhance import get_loss_dict_enhance
-from trainer import Trainer
+from trainer import Trainer, resolve_train_arm
 
 import os
 import torch
@@ -80,29 +80,36 @@ if __name__ == '__main__':
                 _model, args.freeze_stages, args.num_gpu)
             _logger.info('Frozen MainNet stages: %s; frozen parameter count: %d'
                          % (args.freeze_stages, len(frozen_names)))
-        if getattr(args, 'adapter_only', False):
-            # Freeze everything, then re-enable ONLY the H/4 texture adapter.
-            # The Trainer builds its param groups afterwards, so the optimizer
-            # ends up holding nothing but the adapter.
-            base = getattr(args, 'adapter_base_ckpt', '')
+        # Step-budget training arm: load the frozen base, freeze everything,
+        # then re-enable only the arm's whitelist. Trainer builds one optimizer
+        # group per whitelist entry afterwards.
+        _arm = getattr(args, 'train_arm', 'none')
+        if getattr(args, 'adapter_only', False) and _arm == 'none':
+            _arm = 'adapter'
+        if _arm != 'none':
+            base = (getattr(args, 'train_base_ckpt', '')
+                    or getattr(args, 'adapter_base_ckpt', ''))
             if (not base) or (not os.path.isfile(base)):
-                raise SystemExit(
-                    '--adapter_only requires an existing --adapter_base_ckpt '
-                    '(got %r)' % base)
-            _logger.info('adapter-only base checkpoint: ' + base)
+                raise SystemExit('--train_arm %s requires an existing base '
+                                 'checkpoint (got %r)' % (_arm, base))
+            _logger.info('train arm %s, base checkpoint: %s' % (_arm, base))
             _model = TTSREnhance.load_pretrained_weights(_model, base, device)
+            _groups = resolve_train_arm(_model, _arm)
             _net = _model.module if hasattr(_model, 'module') else _model
-            _net.requires_grad_(False)
-            _adapter = _net.MainNet.denoiser.ref_adapter
-            _adapter.requires_grad_(True)
-            _trainable = [n for n, p in _net.named_parameters() if p.requires_grad]
-            if (not _trainable) or any('ref_adapter' not in n for n in _trainable):
-                raise SystemExit('adapter-only: unexpected trainable set %s'
-                                 % _trainable[:8])
-            _logger.info('adapter-only: %d trainable tensors, all under '
-                         'MainNet.denoiser.ref_adapter (%d params)'
-                         % (len(_trainable),
-                            sum(p.numel() for p in _adapter.parameters())))
+            _want = {id(p) for _n, _ps in _groups for p in _ps}
+            _have = {id(p) for p in _net.parameters() if p.requires_grad}
+            if _want != _have:
+                raise SystemExit('train arm %s: trainable set does not match '
+                                 'the whitelist' % _arm)
+            _logger.info('train arm %s: %d trainable tensors, %d params'
+                         % (_arm, len(_have),
+                            sum(p.numel() for p in _net.parameters()
+                                if p.requires_grad)))
+            for _gname, _ps in _groups:
+                _logger.info('  group %s: %d tensors, %d params'
+                             % (_gname, len(_ps),
+                                sum(p.numel() for p in _ps)))
+            args.train_arm = _arm
         # Save the freshly constructed weights so a later ablation arm can
         # share a *verified* initialisation instead of relying on the seed
         # reproducing the same construction order. Load it with
@@ -136,8 +143,9 @@ if __name__ == '__main__':
     elif (args.eval):
         t.load(model_path=args.model_path)
         t.evaluate()
-    elif getattr(args, 'adapter_only', False):
-        t.train_adapter_only()
+    elif (getattr(args, 'adapter_only', False)
+          or getattr(args, 'train_arm', 'none') != 'none'):
+        t.train_step_budget()
     else:
         for epoch in range(1, args.num_init_epochs+1):
             t.train(current_epoch=epoch, is_init=True)

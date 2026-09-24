@@ -99,6 +99,25 @@ parser.add_argument('--adapter_lr_after_drop', type=float, default=5e-5,
                     help='Adapter LR after the drop')
 parser.add_argument('--adapter_eval_every', type=int, default=1000,
                     help='Run a full evaluation every N adapter updates (step 0 always runs)')
+parser.add_argument('--train_arm', type=str, default='none',
+                    choices=['none', 'adapter', 'decoder_tail', 'decoder_tail_texture'],
+                    help='Step-budget training arm. "adapter" = only the H/4 texture adapter '
+                         '(same as --adapter_only); "decoder_tail" = last decoder stage + '
+                         'mapping only (no reference); "decoder_tail_texture" = decoder_tail '
+                         'plus the texture adapter. Everything else stays frozen.')
+parser.add_argument('--train_base_ckpt', type=str, default='',
+                    help='Frozen starting checkpoint for --train_arm (falls back to '
+                         '--adapter_base_ckpt). Must exist; no fallback.')
+parser.add_argument('--train_steps', type=int, default=3000,
+                    help='Optimizer updates for --train_arm')
+parser.add_argument('--train_lr_drop_step', type=int, default=2000,
+                    help='LRs are reduced once this many updates have completed')
+parser.add_argument('--train_eval_every', type=int, default=1000,
+                    help='Full evaluation every N updates (step 0 always runs)')
+parser.add_argument('--tail_lr', type=float, default=1e-5,
+                    help='LR for the decoder-tail group before the drop')
+parser.add_argument('--tail_lr_after_drop', type=float, default=5e-6,
+                    help='LR for the decoder-tail group after the drop')
 parser.add_argument('--no_global_illum', type=str2bool, default=False,
                     help='Disable GlobalIllumHead entirely (not constructed, so it adds no '
                          'parameters and no post-processing step)')

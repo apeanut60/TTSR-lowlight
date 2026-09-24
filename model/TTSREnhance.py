@@ -83,6 +83,20 @@ class TTSREnhance(nn.Module):
         """Delegate to MainNet's global illumination head (post-stitch use)."""
         return self.MainNet.apply_illum_head(x, low)
 
+    def illum_enabled(self):
+        """Which whole-image post-processing steps are active for this run.
+
+        The two delegate methods above cannot decide this themselves: they are
+        also used by the tiled inference path, which must apply each step at
+        most once on the stitched image. The disable switches therefore have to
+        be resolved here, from the same args the ordinary forward uses, so that
+        ``--no_ref_illum``/``--no_global_illum`` are honoured on both paths.
+        """
+        apply_illum = not getattr(self.args, 'no_global_illum', False)
+        apply_ref_illum = ((not getattr(self.args, 'no_reference', False))
+                           and (not getattr(self.args, 'no_ref_illum', False)))
+        return apply_illum, apply_ref_illum
+
     def apply_ref_illum(self, x, low, ref):
         """Delegate to MainNet's reference illumination transfer (post-stitch)."""
         return self.MainNet.apply_ref_illum(x, low, ref)
