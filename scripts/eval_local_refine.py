@@ -26,7 +26,7 @@ sys.argv = [sys.argv[0]]
 
 from local_refine_runtime import (build_manifest, evaluate_conditions,    # noqa: E402
                                   mismatch_permutation, read_manifest_csv,
-                                  sha256)
+                                  sha256, verify_cache)
 from model.LocalRefine import Refiner, count_params                      # noqa: E402
 
 
@@ -45,6 +45,7 @@ def main():
 
     rows = read_manifest_csv(os.path.join(a.out_root, 'manifests_eval.csv'))
     eval_cache = os.path.join(a.out_root, 'cache_n0_eval')
+    verify_cache(eval_cache)
 
     def load(arm):
         p = os.path.join(a.out_root, 'V2_%s_s%d' % (arm.capitalize(), a.seed),
@@ -103,9 +104,10 @@ def main():
               % (l, d.mean(), np.median(d), int((d > 0).sum()), len(d), d.min()))
     # ssim summary
     print()
-    print('  SSIM(rgb) 0.6HW+0.4NK: %s' % ' '.join(
-        '%s=%.4f' % (l, 0.6 * mean(l, 'Huawei', 'ssim_rgb')
-                     + 0.4 * mean(l, 'Nikon', 'ssim_rgb')) for l in labels))
+    # ``utils.calc_ssim`` returns Y-channel SSIM, so say so (audit §4).
+    print('  SSIM(Y) 0.6HW+0.4NK: %s' % ' '.join(
+        '%s=%.4f' % (l, 0.6 * mean(l, 'Huawei', 'ssim_y')
+                     + 0.4 * mean(l, 'Nikon', 'ssim_y')) for l in labels))
 
     if a.out:
         os.makedirs(os.path.dirname(a.out), exist_ok=True)
@@ -117,7 +119,20 @@ def main():
                 for r, j in zip(rows, mismatch_permutation(rows))}
         init_name = ('refiner_init.pt' if a.seed == 42
                      else 'refiner_init_s%d.pt' % a.seed)
-        base_sha = sha256(os.path.join(a.out_root, init_name))
+        init_sha = sha256(os.path.join(a.out_root, init_name))
+        # The N0 identity is the frozen base checkpoint + the cache it produced,
+        # NOT the refiner init (the old ``base_sha`` column recorded the latter).
+        meta_path = os.path.join(a.out_root, 'cache_n0_eval', 'metadata.json')
+        if not os.path.isfile(meta_path):
+            raise SystemExit('cache metadata missing: %s' % meta_path)
+        import json as _json
+        cache_meta = _json.load(open(meta_path, encoding='utf-8'))
+        # New caches use base_checkpoint_sha256; older ones only had base_sha256.
+        base_sha = (cache_meta.get('base_checkpoint_sha256')
+                    or cache_meta.get('base_sha256', ''))
+        if not base_sha:
+            raise SystemExit('cache metadata records no base checkpoint hash')
+        cache_sha = sha256(meta_path)
         ck_sha = {}
         for arm in ('self', 'nano'):
             p = os.path.join(a.out_root, 'V2_%s_s%d' % (arm.capitalize(), a.seed),
@@ -141,17 +156,21 @@ def main():
         with open(a.out, 'w', newline='', encoding='utf-8') as f:
             w = csv.writer(f)
             w.writerow(['sample_id', 'camera', 'step', 'condition', 'ref_source',
-                        'ref_path', 'base_sha', 'checkpoint_sha', 'psnr_rgb',
-                        'ssim_rgb', 'delta_vs_n0', 'delta_vs_self'])
+                        'ref_path', 'base_checkpoint_sha256',
+                        'refiner_init_sha256', 'checkpoint_sha',
+                        'cache_metadata_sha256', 'psnr_rgb', 'ssim_y',
+                        'delta_vs_n0', 'delta_vs_self'])
             for sid in sorted(out['N0']):
                 n0 = out['N0'][sid]['psnr_rgb']
                 slf = out['V2-Self'][sid]['psnr_rgb']
                 for l in labels:
                     rs, rp = ref_of(l, sid)
+                    ck = ('' if l in ('N0', 'V2-Nano-bypass')
+                          else ck_sha['nano' if 'Nano' in l else 'self'])
                     w.writerow([sid, out['N0'][sid]['camera'], a.step, l, rs, rp,
-                                base_sha, ck_sha['nano' if 'Nano' in l else 'self'],
+                                base_sha, init_sha, ck, cache_sha,
                                 '%.6f' % out[l][sid]['psnr_rgb'],
-                                '%.6f' % out[l][sid]['ssim_rgb'],
+                                '%.6f' % out[l][sid]['ssim_y'],
                                 '%+.6f' % (out[l][sid]['psnr_rgb'] - n0),
                                 '%+.6f' % (out[l][sid]['psnr_rgb'] - slf)])
         print('\nper-image -> %s' % a.out)

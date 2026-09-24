@@ -32,7 +32,7 @@ from loss.loss_enhance import (ColorConstancyLoss, ExposureControlLoss,  # noqa:
 from model.LocalRefine import Refiner, count_params            # noqa: E402
 from model.Vgg19 import Vgg19                                  # noqa: E402
 from local_refine_runtime import (evaluate_conditions, read_manifest_csv,  # noqa: E402
-                                  sha256)
+                                  sha256, verify_cache)
 
 
 def build_rows(out_root, tag):
@@ -58,10 +58,22 @@ def main():
     ap.add_argument('--log_every', type=int, default=100)
     ap.add_argument('--limit_steps', type=int, default=0,
                     help='debug: stop early (0 = full budget)')
+    ap.add_argument('--allow_overwrite', action='store_true',
+                    help='reuse a run dir that already contains checkpoints/logs')
     a = ap.parse_args(_CLI)
 
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     run_dir = os.path.join(a.out_root, 'V2_%s_s%d' % (a.arm.capitalize(), a.seed))
+    # A positive result must not be silently replaced by a rerun (audit §4).
+    existing = [f for f in ('train.jsonl', 'config.json', 'eval_history.json')
+                if os.path.isfile(os.path.join(run_dir, f))]
+    existing += [f for f in os.listdir(run_dir)
+                 if f.startswith('checkpoint_')] if os.path.isdir(run_dir) else []
+    if existing and not a.allow_overwrite:
+        raise SystemExit(
+            'refusing to overwrite existing run %s (found %s); '
+            'pass --allow_overwrite to reuse it'
+            % (run_dir, ', '.join(sorted(existing)[:4])))
     os.makedirs(run_dir, exist_ok=True)
     t0 = time.time()
     print('=== V2-%s  run_dir=%s' % (a.arm, run_dir))
@@ -72,6 +84,9 @@ def main():
     train_cache = os.path.join(a.out_root, 'cache_n0_train')
     eval_cache = os.path.join(a.out_root, 'cache_n0_eval')
     print('rows: train %d, eval %d' % (len(tr_rows), len(ev_rows)))
+    train_meta = verify_cache(train_cache)
+    eval_meta = verify_cache(eval_cache)
+    print('cache base sha256: %s' % train_meta['_base_sha'][:16])
 
     refiner = Refiner().to(device)
     if count_params(refiner) != 78724:
@@ -101,9 +116,17 @@ def main():
     color = ColorConstancyLoss()
 
     ds = LocalRefineTrainSet(tr_rows, train_cache, crop_size=a.crop_size, seed=a.seed)
+    # Independent generator so the shuffle order cannot be perturbed by other
+    # RNG consumers (model init, evaluation). Same seed -> both arms see the
+    # same order, while the sequence still advances across passes.
+    loader_gen = torch.Generator()
+    loader_gen.manual_seed(a.seed)
     dl = DataLoader(ds, batch_size=a.batch_size, shuffle=True,
                     num_workers=a.workers, drop_last=True,
-                    worker_init_fn=_worker_init)
+                    worker_init_fn=_worker_init, generator=loader_gen)
+    if len(dl) == 0:
+        raise SystemExit('empty dataloader: %d samples / batch %d'
+                         % (len(ds), a.batch_size))
     opt = torch.optim.Adam(refiner.parameters(), lr=a.lr, betas=(0.9, 0.999),
                            eps=1e-8, weight_decay=0)
 
@@ -126,7 +149,11 @@ def main():
     refiner.train()
     run_eval(0)
     step = 0
+    data_pass = 0
     while step < steps:
+        # Must be set before the iterator for this pass is created: it seeds the
+        # per-sample crop/rot/flip, which is otherwise frozen for the whole run.
+        ds.set_data_pass(data_pass)
         for batch in dl:
             if step >= steps:
                 break
@@ -151,7 +178,8 @@ def main():
             opt.step()
 
             if step % a.log_every == 0 or step == 1:
-                row = dict(step=step, lr=lr, loss=float(loss.detach()),
+                row = dict(step=step, data_pass=data_pass, lr=lr,
+                           loss=float(loss.detach()),
                            rec=float(l_rec.detach()), per=float(l_per.detach()),
                            smooth=float(l_sm.detach()), color=float(l_co.detach()),
                            grad_norm=gnorm,
@@ -173,11 +201,19 @@ def main():
                 print('  LR check at update %d: %.3e' % (step, lr))
             if step % a.eval_every == 0 or step == steps:
                 run_eval(step)
+        if step < steps:
+            data_pass += 1
+    print('data passes consumed: %d' % (data_pass + 1))
 
     with open(os.path.join(run_dir, 'config.json'), 'w', encoding='utf-8') as f:
         json.dump(dict(vars(a), refiner_params=count_params(refiner),
                        refiner_init_sha256=sha256(init_path),
-                       train_cache=train_cache, eval_cache=eval_cache),
+                       train_cache=train_cache, eval_cache=eval_cache,
+                       base_checkpoint_sha256=train_meta['_base_sha'],
+                       cache_metadata_sha256=sha256(
+                           os.path.join(train_cache, 'metadata.json')),
+                       data_passes=data_pass + 1,
+                       loader_order_seed=a.seed),
                   f, indent=2, sort_keys=True)
     with open(os.path.join(run_dir, 'eval_history.json'), 'w', encoding='utf-8') as f:
         json.dump(hist, f, indent=2)

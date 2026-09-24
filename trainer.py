@@ -40,6 +40,27 @@ TRAIN_ARMS = {
 }
 
 
+def tile_starts(length, tile, stride):
+    """Tile start offsets covering ``[0, length)`` with no negative origin.
+
+    The last tile is clamped so it ends exactly at ``length``; duplicates that
+    the clamp can introduce are dropped. Every returned start satisfies
+    ``start + tile <= length``, so slicing is always in range.
+    """
+    if tile >= length:
+        return [0]
+    stride = max(1, int(stride))
+    starts = []
+    i = 0
+    while True:
+        s = min(i * stride, length - tile)
+        if not starts or s > starts[-1]:
+            starts.append(s)
+        if s >= length - tile:
+            return starts
+        i += 1
+
+
 def resolve_train_arm(model, arm):
     """Freeze everything, re-enable the arm's whitelist, return its groups.
 
@@ -287,37 +308,55 @@ class Trainer():
         tile_size = tile_size or getattr(self.args, 'tile_size', 256)
         overlap = overlap if (overlap is not None) else getattr(
             self.args, 'tile_overlap', 96)
-        overlap = max(0, min(overlap, tile_size // 2))
         window = getattr(self.args, 'tile_window', 'cosine').lower()
 
         _, _, H, W = lr.shape
         if H <= tile_size and W <= tile_size:
             return self.model(lr=lr, lrsr=lr_sr, ref=ref, refsr=ref_sr)
 
-        stride = max(1, tile_size - overlap)
-        # Number of tiles in each dimension
-        n_h = max(1, (H - overlap + stride - 1) // stride)
-        n_w = max(1, (W - overlap + stride - 1) // stride)
+        # Per-axis tile extent: on a short side use the actual length instead of
+        # letting ``min(i*stride, H - tile_size)`` go negative and produce a
+        # mis-shaped slice.
+        tile_h = min(tile_size, H)
+        tile_w = min(tile_size, W)
+        overlap_h = max(0, min(overlap, tile_h // 2))
+        overlap_w = max(0, min(overlap, tile_w // 2))
+        starts_h = tile_starts(H, tile_h, max(1, tile_h - overlap_h))
+        starts_w = tile_starts(W, tile_w, max(1, tile_w - overlap_w))
+        n_h, n_w = len(starts_h), len(starts_w)
 
         # Output accumulator and weight map for feathering
         sr_accum = torch.zeros(1, 3, H, W, device=lr.device)
         weight_accum = torch.zeros(1, 1, H, W, device=lr.device)
 
-        # Feathering mask: 1.0 in center, decays to 0 at edges
-        mask_y = torch.ones(tile_size, device=lr.device)
-        mask_x = torch.ones(tile_size, device=lr.device)
-        if overlap > 0:
+        def _mask(length, ov, first, last, device):
+            """Feather only edges that a neighbouring tile actually covers.
+
+            The image's outermost row/column has no neighbour, so it must keep
+            weight 1.0 -- otherwise ``sr_accum / weight_accum`` divides 0 by the
+            clamped denominator and paints a mid-grey frame into every Y0.
+            """
+            m = torch.ones(length, device=device)
+            if ov <= 0:
+                return m
+            ramp = _feather_ramp(ov, window, device)
+            if not first:
+                m[:ov] = ramp
+            if not last:
+                m[-ov:] = ramp.flip(0)
+            return m
+
+        def _feather_ramp(n, window, device):
+            if n <= 0:
+                return None
+            if n == 1:
+                # A length-1 cosine ramp is exactly 0 on both sides of the seam,
+                # which would leave that pixel uncovered. Use a non-zero split.
+                return torch.full((1,), 0.5, device=device)
             if window == 'cosine':
-                ramp = 0.5 - 0.5 * torch.cos(
-                    torch.linspace(0, math.pi, overlap, device=lr.device))
-            else:
-                ramp = torch.linspace(0, 1, overlap, device=lr.device)
-            mask_y[:overlap] = ramp
-            mask_y[-overlap:] = ramp.flip(0)
-            mask_x[:overlap] = ramp
-            mask_x[-overlap:] = ramp.flip(0)
-        feather = mask_y[:, None] * mask_x[None, :]  # [tile, tile]
-        feather = feather.view(1, 1, tile_size, tile_size)
+                return 0.5 - 0.5 * torch.cos(
+                    torch.linspace(0, math.pi, n, device=device))
+            return torch.linspace(0, 1, n, device=device)
 
         last_S, last_T3, last_T2, last_T1 = None, None, None, None
         # The global illumination head is a per-image transform. Run the
@@ -334,12 +373,17 @@ class Trainer():
         else:
             do_illum, do_refillum = True, True
 
-        for i_h in range(n_h):
-            y0 = min(i_h * stride, H - tile_size)
-            y1 = y0 + tile_size
-            for i_w in range(n_w):
-                x0 = min(i_w * stride, W - tile_size)
-                x1 = x0 + tile_size
+        for i_h, y0 in enumerate(starts_h):
+            y1 = y0 + tile_h
+            for i_w, x0 in enumerate(starts_w):
+                x1 = x0 + tile_w
+
+                feather = (
+                    _mask(tile_h, overlap_h, i_h == 0, i_h == n_h - 1,
+                          lr.device)[:, None]
+                    * _mask(tile_w, overlap_w, i_w == 0, i_w == n_w - 1,
+                            lr.device)[None, :]
+                ).view(1, 1, tile_h, tile_w)
 
                 tile_lr = lr[:, :, y0:y1, x0:x1]
                 tile_lr_sr = lr_sr[:, :, y0:y1, x0:x1]
@@ -358,7 +402,18 @@ class Trainer():
                 weight_accum[:, :, y0:y1, x0:x1] += feather
                 last_S, last_T3, last_T2, last_T1 = S, T3, T2, T1
 
-        sr = sr_accum / weight_accum.clamp(min=1e-8)
+        # Fail loudly instead of hiding uncovered pixels behind a denominator
+        # clamp: a silent 0/eps paints a mid-grey frame into every Y0.
+        if not bool(torch.isfinite(weight_accum).all()):
+            raise RuntimeError('tiled forward: non-finite blend weights '
+                               '(H=%d W=%d tile=%d overlap=%d)'
+                               % (H, W, tile_size, overlap))
+        w_min = float(weight_accum.min())
+        if w_min <= 0.0:
+            raise RuntimeError('tiled forward left uncovered pixels: min blend '
+                               'weight %.3e (H=%d W=%d tile=%d overlap=%d)'
+                               % (w_min, H, W, tile_size, overlap))
+        sr = sr_accum / weight_accum
         if has_refillum and do_refillum:
             sr = net.apply_ref_illum(sr, lr, ref)
         if has_illum and do_illum:

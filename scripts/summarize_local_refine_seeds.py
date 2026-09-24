@@ -39,10 +39,18 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--out_root',
                     default='/root/data/experiments/retinex_v2_localref')
-    ap.add_argument('--pattern', default='per_image_v2*.csv')
+    ap.add_argument('--pattern', action='append', default=None,
+                    help='explicit glob(s); defaults to this protocol only, so '
+                         'a future per_image_v21_*.csv cannot leak in')
+    ap.add_argument('--expect_seeds', default='',
+                    help='comma list that must be present exactly once')
     a = ap.parse_args()
 
-    paths = sorted(glob.glob(os.path.join(a.out_root, a.pattern)))
+    # ``per_image_v2*.csv`` would also match ``per_image_v21_*.csv``; anchor on
+    # the seed suffix instead of a bare prefix.
+    patterns = a.pattern or ['per_image_v2.csv', 'per_image_v2_s*.csv']
+    paths = sorted({p for pat in patterns
+                    for p in glob.glob(os.path.join(a.out_root, pat))})
     if not paths:
         raise SystemExit('no per-image CSVs under %s' % a.out_root)
 
@@ -64,6 +72,16 @@ def main():
         d = {k: float(v['V2-Nano-correct']['psnr_rgb'])
                 - float(v['N0']['psnr_rgb']) for k, v in by.items()}
         per_image[seed] = d
+
+    seen = [r['seed'] for r in rows]
+    if len(set(seen)) != len(seen):
+        raise SystemExit('duplicate seeds in selection: %s (pass --pattern to '
+                         'pin exactly one CSV per seed)' % sorted(seen))
+    if a.expect_seeds:
+        want = [s.strip() for s in a.expect_seeds.split(',') if s.strip()]
+        missing = [s for s in want if s not in per_image]
+        if missing or len(seen) != len(want):
+            raise SystemExit('expected seeds %s, got %s' % (want, seen))
 
     print('%-6s %9s %9s %9s %9s | %9s %9s' %
           ('seed', 'N0', 'Self', 'Nano', 'bypass', 'Nano-N0', 'Nano-Self'))

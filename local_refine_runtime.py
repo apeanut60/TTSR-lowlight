@@ -74,6 +74,7 @@ def load_frozen_n0(base_ckpt, base_run_dir, device='cuda'):
     cfg.no_global_illum = True
     cfg.ref_correction = False
     model = TTE.TTSREnhance(cfg).to(device)
+    _assert_base_keys_loadable(model, base_ckpt)
     model = TTE.load_pretrained_weights(model, base_ckpt, device)
     model.eval()
     quiet = logging.getLogger('n0_%d' % id(model))
@@ -86,6 +87,26 @@ def load_frozen_n0(base_ckpt, base_run_dir, device='cuda'):
     for p in model.parameters():
         p.requires_grad_(False)
     return model, tr, cfg
+
+
+def _assert_base_keys_loadable(model, base_ckpt):
+    """Refuse to run on a silently partial pretrained load.
+
+    ``load_pretrained_weights`` copies only keys whose name *and* shape match and
+    reports a count; anything else keeps its random init without complaining.
+    That is fine for the original transfer-learning use, but this runtime claims
+    to be a *frozen* N0, so every key in the checkpoint must be loadable.
+    """
+    sd = torch.load(base_ckpt, map_location='cpu')
+    msd = model.state_dict()
+    bad = [k for k, v in sd.items()
+           if k not in msd or tuple(msd[k].shape) != tuple(v.shape)]
+    if bad:
+        raise SystemExit(
+            'base checkpoint %s has %d key(s) that cannot load into the model '
+            '(first: %s); refusing a partial load'
+            % (base_ckpt, len(bad), ', '.join(bad[:5])))
+    return len(sd)
 
 
 @torch.no_grad()
@@ -186,13 +207,45 @@ def write_metadata(cache_dir, extra):
         json.dump(extra, f, indent=2, sort_keys=True)
 
 
+def verify_cache(cache_dir, expect_manifest_sha=None, strict=False):
+    """Check a Y0 cache is complete and self-consistent before training/eval.
+
+    Returns the metadata dict. ``complete`` is only set by the V2.1 cache
+    writer, so a missing flag means the cache predates the tiling fix -- that is
+    reported loudly rather than silently accepted, because such a cache has the
+    0-weight outer ring baked in.
+    """
+    path = os.path.join(cache_dir, 'metadata.json')
+    if not os.path.isfile(path):
+        raise SystemExit('cache metadata missing: %s' % path)
+    meta = json.load(open(path, encoding='utf-8'))
+    base = meta.get('base_checkpoint_sha256') or meta.get('base_sha256')
+    if not base:
+        raise SystemExit('%s records no base checkpoint hash' % path)
+    meta['_base_sha'] = base
+    if not meta.get('complete'):
+        msg = ('cache %s has no completion flag: generated before the V2.1 '
+               'tiling fix, so its outer 1px ring is 0' % cache_dir)
+        if strict:
+            raise SystemExit(msg)
+        print('[cache] WARNING: %s' % msg)
+    if expect_manifest_sha and meta.get('manifest_sha256') \
+            and meta['manifest_sha256'] != expect_manifest_sha:
+        raise SystemExit('cache %s was built from a different manifest' % cache_dir)
+    return meta
+
+
 # ─── metrics ──────────────────────────────────────────────────────────────
 
 EVAL_QUERY_CHUNK = 1024
 
 
 def metrics(sr, hr):
-    """sr, hr: [1,3,H,W] in [-1,1] -> (psnr_rgb, ssim_rgb, mse)."""
+    """sr, hr: [1,3,H,W] in [-1,1] -> (psnr_rgb, ssim_y, mse).
+
+    ``utils.calc_ssim`` returns the SSIM of the Y channel (its per-channel loop
+    is dead code for 3-channel input), so the value must not be labelled RGB.
+    """
     if sr.shape != hr.shape:
         raise ValueError('shape mismatch %s vs %s — refuse to silently crop'
                          % (tuple(sr.shape), tuple(hr.shape)))
@@ -257,7 +310,7 @@ def evaluate_conditions(refiner, rows, eval_cache_dir, conditions, device,
 
 def _metric_triple(sr, hr):
     p, s, m = metrics(sr, hr)
-    return dict(psnr_rgb=p, ssim_rgb=s, mse=m)
+    return dict(psnr_rgb=p, ssim_y=s, mse=m)
 
 
 def _read_eval_tensor(path, device, size=None):
