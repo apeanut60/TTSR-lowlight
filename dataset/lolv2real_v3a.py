@@ -289,8 +289,14 @@ class TrainSet(_Base):
 class TestSet(_Base):
     """Full-image test set. No crop, no geometry randomisation."""
 
-    def __init__(self, args, ref_level='1', pairs=None, y0_cache=None):
-        super().__init__(args, 'Test', require_ref=True, pairs=pairs,
+    def __init__(self, args, ref_level='1', pairs=None, y0_cache=None,
+                 require_ref=None):
+        # A reference-free run needs no references anywhere, including here --
+        # without this, training a reference-free base with a held-out split
+        # fails at loader construction.
+        if require_ref is None:
+            require_ref = not getattr(args, 'no_reference', False)
+        super().__init__(args, 'Test', require_ref=require_ref, pairs=pairs,
                          y0_cache=y0_cache)
 
     def __getitem__(self, idx):

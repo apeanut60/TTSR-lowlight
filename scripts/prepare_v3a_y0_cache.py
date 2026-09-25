@@ -34,6 +34,7 @@ def _commit():
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--root', default='/root/data/experiments/v3a_lolv2real')
+    ap.add_argument('--cache_name', default='cache_y0')
     ap.add_argument('--base_ckpt', required=True)
     ap.add_argument('--base_run_dir', required=True)
     ap.add_argument('--device', default='cuda')
@@ -47,7 +48,7 @@ def main():
     import csv
     metas = {}
     for tag, man in jobs:
-        cdir = os.path.join(a.root, 'cache_y0', tag)
+        cdir = os.path.join(a.root, a.cache_name, tag)
         os.makedirs(cdir, exist_ok=True)
         rows = list(csv.DictReader(open(man, encoding='utf-8')))
         for i, r in enumerate(rows):
@@ -70,7 +71,7 @@ def main():
             clamp=False, round=False, infer_from_low_only=True, complete=True))
         metas[tag] = dict(n=len(rows), sha256=sha256(os.path.join(cdir, 'metadata.json')))
         print('%s: %d cached -> %s' % (tag, len(rows), cdir))
-    json.dump(metas, open(os.path.join(a.root, 'cache_y0', 'index.json'), 'w',
+    json.dump(metas, open(os.path.join(a.root, a.cache_name, 'index.json'), 'w',
                           encoding='utf-8'), indent=2, sort_keys=True)
 
 

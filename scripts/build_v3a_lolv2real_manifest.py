@@ -14,9 +14,13 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+# option.py calls parser.parse_args() at import time, so argv must be cleared
+# before anything that imports it (local_refine_runtime does).
+_CLI = sys.argv[1:]
+sys.argv = [sys.argv[0]]
+
 from dataset.lolv2real_v3a import collect_pairs, gt_name_for, list_files  # noqa: E402
 from local_refine_runtime import sha256                                   # noqa: E402
-from option import parser as option_parser                                # noqa: E402
 
 FIELDS = ['sample_id', 'camera', 'local_path', 'low_path', 'high_path',
           'nano_path', 'low_sha256', 'high_sha256', 'nano_sha256',
@@ -28,7 +32,7 @@ def main():
     ap.add_argument('--dataset_dir', default='/root/data/datasets/lol-v2-real')
     ap.add_argument('--ref_variant', default='nanobanana_ref_v2')
     ap.add_argument('--out_root', default='/root/data/experiments/v3a_lolv2real')
-    a = ap.parse_args()
+    a = ap.parse_args(_CLI)
     os.makedirs(os.path.join(a.out_root, 'manifests'), exist_ok=True)
 
     from PIL import Image
