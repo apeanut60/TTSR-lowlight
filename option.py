@@ -221,6 +221,9 @@ parser.add_argument('--lolv2_nanobanana_subset', type=str, default='real',
                     help='Subset for lolv2 nanobanana training: real / syn')
 parser.add_argument('--lolv2_nanobanana_ref_subdir', type=str, default='nanobanana_ref_v2',
                     help='Subdirectory name for lolv2 nanobanana refs under Train/')
+parser.add_argument('--v3a_ref_variant', type=str, default='',
+                    help='V3-A only: reference sub-directory name resolved per split as '
+                         '<dataset_dir>/<Train|Test>/<variant>. Empty = use --ref_dir.')
 parser.add_argument('--lolv2_nanobanana_mixed_weights', type=str, default='1,1',
                     help='Sampling weights for lolv2real_nanobanana,lolv2syn_nanobanana')
 parser.add_argument('--mixed_data1_lolv2_nanobanana_weights', type=str,

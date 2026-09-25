@@ -49,6 +49,7 @@ def get_dataloader(args):
 
     elif (args.dataset in ['LOL', 'data1', 'data2', 'data1_nanobanana',
                            'lolv2_nanobanana', 'lolv2real', 'lolv2syn', 'SICE',
+                           'lolv2real_v3a',
                            'lolv2_nanobanana_mixed',
                            'mixed_data1_lolv2_nanobanana',
                            'mixed_lolv2_data1',
