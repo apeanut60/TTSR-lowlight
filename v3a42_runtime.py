@@ -12,6 +12,11 @@ For one block B the optimum is closed-form:
     q_B = clip( sum_{(x,y) in B, c} (H-Y0)*D  /  ( sum_B D^2 + eps ), 0, 1 )
 
 and the gate is piecewise-constant (nearest block assignment, no interpolation).
+
+The oracle minimises the *continuous* RGB MSE on the [-1,1] tensors. What the
+project reports (`local_refine_runtime.metrics`) is PSNR on 8-bit rounded
+images, which is not exactly the same objective; the difference is far below
+the resolution effects measured here, but the distinction is kept explicit.
 """
 
 import json
@@ -23,7 +28,8 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-ORACLE_DEF_VERSION = 'v3a42:blockwise-piecewise-constant-nearest'
+ORACLE_DEF_VERSION = ('v3a42b:blockwise-piecewise-constant-nearest'
+                      '+block-h4-endpoint')
 
 
 # ── §6 deterministic, gap-free block partition ──────────────────────────────
@@ -44,10 +50,29 @@ def block_edges(length, grid):
     return e
 
 
-@lru_cache(maxsize=128)
-def _block_index_map_cached(height, width, grid):
-    ey = block_edges(height, grid)
-    ex = block_edges(width, grid)
+def as_grid_pair(grid_size):
+    """G -> (G, G); (Gy, Gx) -> (Gy, Gx). Both must be >= 1.
+
+    A rectangular pair is needed for the H/4 endpoint: 400x600 gives a
+    100 x 150 cell grid, which is H/4 on BOTH axes and therefore the same
+    resolution as the legacy H/4 spatial oracle.
+    """
+    if isinstance(grid_size, (tuple, list)):
+        gy, gx = int(grid_size[0]), int(grid_size[1])
+    else:
+        gy = gx = int(grid_size)
+    return max(1, gy), max(1, gx)
+
+
+def h4_block_grid(height, width, factor=4):
+    """The (Gy, Gx) pair whose cells are one H/factor x W/factor sample."""
+    return (max(1, int(height) // factor), max(1, int(width) // factor))
+
+
+@lru_cache(maxsize=256)
+def _block_index_map_cached(height, width, gy, gx):
+    ey = block_edges(height, gy)
+    ex = block_edges(width, gx)
     nby, nbx = len(ey) - 1, len(ex) - 1
     idx = np.empty((height, width), dtype=np.int64)
     for i in range(nby):
@@ -58,13 +83,15 @@ def _block_index_map_cached(height, width, grid):
     return idx.reshape(-1), nby, nbx
 
 
-def block_index_map(height, width, grid):
+def block_index_map(height, width, grid_size):
     """-> (idx [H*W] int64 with values 0..nby*nbx-1, nby, nbx).
 
     Every pixel is assigned exactly one block; no gaps, no overlap. The result
     is a private copy: the cached map must not become mutable shared state.
+    ``grid_size`` is an int or a (Gy, Gx) pair.
     """
-    idx, nby, nbx = _block_index_map_cached(int(height), int(width), int(grid))
+    gy, gx = as_grid_pair(grid_size)
+    idx, nby, nbx = _block_index_map_cached(int(height), int(width), gy, gx)
     return idx.copy(), nby, nbx
 
 
@@ -74,6 +101,7 @@ def blockwise_action_optimal_gate(y0, hr, d_correction, grid_size, eps=1e-8):
     """-> dict(q_grid, q_full, Y_oracle, N_grid, Z_grid, nby, nbx).
 
     ``d_correction`` must already include the proposal gate (g_v2 * delta).
+    ``grid_size`` is an int (square grid) or a (Gy, Gx) pair.
     """
     if y0.shape != hr.shape or y0.shape != d_correction.shape:
         raise ValueError('y0/hr/D must share a shape, got %s %s %s'
@@ -82,8 +110,9 @@ def blockwise_action_optimal_gate(y0, hr, d_correction, grid_size, eps=1e-8):
     b, _c, h, w = y0.shape
     N = ((hr - y0) * d_correction).sum(dim=1, keepdim=True)     # [B,1,H,W]
     Z = (d_correction ** 2).sum(dim=1, keepdim=True)
+    gy, gx = as_grid_pair(grid_size)
     # hot path: read the cached (read-only) map instead of rebuilding it
-    idx, nby, nbx = _block_index_map_cached(h, w, int(grid_size))
+    idx, nby, nbx = _block_index_map_cached(h, w, gy, gx)
     nblk = nby * nbx
     t = torch.as_tensor(idx, dtype=torch.long, device=y0.device)
     Nf = N.reshape(b, -1)

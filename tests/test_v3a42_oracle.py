@@ -30,8 +30,10 @@ sys.path.insert(0, ROOT)
 from v3a41_runtime import (global_action_optimal_gate,          # noqa: E402
                            qopt_components)
 from v3a42_runtime import (ORACLE_DEF_VERSION, block_edges,     # noqa: E402
-                           block_index_map, blockwise_action_optimal_gate,
+                           as_grid_pair, block_index_map,
+                           blockwise_action_optimal_gate,
                            global_action_optimal_gate_reference,
+                           h4_block_grid,
                            spatial_action_optimal_gate, spatial_oracle_q4,
                            verify_v3a42_artifact_lock)
 from v3a4_runtime import verify_v3a4_artifact_lock               # noqa: E402
@@ -93,6 +95,57 @@ def test_spatial_equals_v3a41_spatial_ao():
     # H/4 really is H/4 (and never below 1 pixel)
     q4 = spatial_oracle_q4(y0, hr, D)
     assert q4.shape[-2:] == (y0.shape[-2] // 4, y0.shape[-1] // 4)
+
+
+def test_block_h4_is_the_same_family_as_the_grid_curve():
+    """Block_H4 must be the G formula at H/4 x W/4 cells -- rectangular, and
+    solved on the FULL-resolution target (that is the whole point of the fix)."""
+    y0, hr, D = _rand(11, h=64, w=96)
+    gy, gx = h4_block_grid(64, 96, 4)
+    assert (gy, gx) == (16, 24)
+    o = blockwise_action_optimal_gate(y0, hr, D, (gy, gx))
+    assert (o['nby'], o['nbx']) == (16, 24)
+    assert o['q_grid'].shape == (1, 16 * 24)
+    # every cell is exactly 4x4 here, and q_full is its nearest expansion
+    idx, nby, nbx = block_index_map(64, 96, (gy, gx))
+    counts = np.bincount(idx, minlength=nby * nbx)
+    assert counts.min() == counts.max() == 16
+    expect = o['q_grid'][0][torch.as_tensor(idx)].reshape(64, 96)
+    assert torch.equal(o['q_full'][0, 0], expect)
+    # a rectangular grid is NOT the same as the square grid with the larger side
+    assert not torch.allclose(
+        o['q_full'], blockwise_action_optimal_gate(y0, hr, D, max(gy, gx))['q_full'])
+    # LOLv2-real geometry: 400x600 -> 100x150 cells of 4x4 px
+    assert h4_block_grid(400, 600, 4) == (100, 150)
+    assert as_grid_pair((100, 150)) == (100, 150)
+
+
+def test_block_h4_dominates_g16_when_the_partitions_nest():
+    """On a size where the H/4 cells refine the G16 blocks, the finer family
+    contains the coarser one, so its exact optimum cannot be worse (continuous
+    MSE -- the reported PSNR is computed on rounded 8-bit images)."""
+    y0, hr, D = _rand(12, h=128, w=128)
+    ms = {}
+    for grid in GRIDS + (h4_block_grid(128, 128, 4),):
+        o = blockwise_action_optimal_gate(y0, hr, D, grid)
+        ms[str(grid)] = float((o['Y_oracle'] - hr).pow(2).mean())
+    blk = ms[str((32, 32))]                      # 128/4 = 32 cells of 4px
+    # 128/G is a multiple of 4 for G in {1,2,4,8,16,32}, so each G block is an
+    # exact union of H/4 cells -> the finer family contains the coarser one
+    for grid in (1, 4, 8, 16):
+        assert blk <= ms[str(grid)] + 1e-12, (grid, blk, ms)
+    assert abs(blk - ms['(32, 32)']) < 1e-12     # the H/4 endpoint IS G=32 here
+
+
+def test_block_oracle_continuous_mse_never_worse_than_r1():
+    """The genuine invariant: q == 1 is feasible in EVERY block family, so the
+    exact block optimum cannot have a larger continuous MSE than R1."""
+    y0, hr, D = _rand(13, h=64, w=96)
+    mse_r1 = float((y0 + D - hr).pow(2).mean())
+    for grid in list(GRIDS) + [(16, 24)]:
+        o = blockwise_action_optimal_gate(y0, hr, D, grid)
+        mse = float((o['Y_oracle'] - hr).pow(2).mean())
+        assert mse <= mse_r1 + 1e-12, (grid, mse, mse_r1)
 
 
 # ── §8.2-§8.4 algebra, at every grid ────────────────────────────────────────
@@ -280,7 +333,8 @@ def _write_lock(tmp, grids='1,2,4,8,16', commit=None):
         mismatch_train_sha256=v4['mismatch_train_sha256'],
         mismatch_dev_sha256=v4['mismatch_dev_sha256'],
         energy_stats_sha256=v4['energy_stats_sha256'],
-        grids=grids, states='correct+true_dark_g0.5+mismatch',
+        grids=grids, block_h4_factor=4,
+        states='correct+true_dark_g0.5+mismatch',
         oracle_def_version=ORACLE_DEF_VERSION)
     path = os.path.join(tmp, 'artifact_lock.json')
     json.dump(lock, open(path, 'w', encoding='utf-8'), indent=2, sort_keys=True)
@@ -319,22 +373,60 @@ def test_artifact_lock_hard_checks():
 
 
 def test_setup_script_refuses_to_redefine_a_frozen_protocol():
+    """A changed protocol may only be re-locked while the root holds no sweep;
+    once oracle/summary.json exists a change must refuse (no mixing)."""
     tmp = tempfile.mkdtemp(prefix='v3a42_setup_')
     try:
         setup = os.path.join(ROOT, 'scripts', 'setup_v3a42_oracle.py')
         subprocess.check_output([sys.executable, setup, '--root', tmp],
                                 stderr=subprocess.STDOUT)
-        # same protocol -> fine (commit may move)
         subprocess.check_output([sys.executable, setup, '--root', tmp],
                                 stderr=subprocess.STDOUT)
-        # a different grid list must refuse instead of silently overwriting
+        # no results yet -> a changed grid list is regenerated, with a note
+        out = subprocess.check_output([sys.executable, setup, '--root', tmp,
+                                       '--grids', '1,2,4'], stderr=subprocess.STDOUT)
+        assert b'no sweep under this root yet' in out, out[-500:]
+        assert json.load(open(os.path.join(tmp, 'artifact_lock.json'),
+                              encoding='utf-8'))['grids'] == '1,2,4'
+        # now pretend a sweep exists: the same change must refuse
+        subprocess.check_output([sys.executable, setup, '--root', tmp,
+                                 '--grids', '1,2,4'], stderr=subprocess.STDOUT)
+        os.makedirs(os.path.join(tmp, 'oracle'), exist_ok=True)
+        json.dump({'fake': True}, open(os.path.join(tmp, 'oracle',
+                                                    'summary.json'), 'w'))
         try:
             subprocess.check_output([sys.executable, setup, '--root', tmp,
-                                     '--grids', '1,2,4'], stderr=subprocess.STDOUT)
+                                     '--grids', '1,2,4,8,16'],
+                                    stderr=subprocess.STDOUT)
         except subprocess.CalledProcessError as e:
-            assert b'refusing to overwrite' in e.output, e.output[-500:]
+            assert b'refusing to mix two protocols' in e.output, e.output[-500:]
         else:
-            raise AssertionError('setup accepted a changed grid list')
+            raise AssertionError('setup mixed two protocols under one root')
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_full_run_without_the_repro_anchor_fails_before_the_sweep():
+    """§14: a --limit 0 sweep must be able to reproduce V3-A.4.1. A missing
+    anchor must fail in seconds, not after the GPU has already burned 20 min."""
+    tmp = tempfile.mkdtemp(prefix='v3a42_anchor_')
+    try:
+        _write_lock(tmp)
+        script = os.path.join(ROOT, 'scripts',
+                              'diagnose_v3a42_blockwise_oracle.py')
+        try:
+            out = subprocess.check_output(
+                [sys.executable, '-W', 'ignore', script, '--root', tmp,
+                 '--splits', 'dev', '--repro_baseline',
+                 os.path.join(tmp, 'does_not_exist.json')],
+                stderr=subprocess.STDOUT, timeout=120).decode()
+        except subprocess.CalledProcessError as e:
+            out = (e.output or b'').decode()
+            assert 'reproduction anchor' in out, out[-800:]
+        else:
+            raise AssertionError('a full run without the anchor did not fail: '
+                                 + out[-800:])
+        assert not os.path.isfile(os.path.join(tmp, 'oracle', 'summary.json'))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -359,7 +451,11 @@ def test_smoke_script_reaches_aggregation():
         s = json.load(open(os.path.join(tmp, 'oracle', 'summary.json'),
                            encoding='utf-8'))
         assert s['protocol']['grids'] == [1, 2, 4, 8, 16]
-        for arm in ('G1', 'G2', 'G4', 'G8', 'G16', 'Spatial_H4'):
+        assert s['protocol']['primary_denominator'] == 'Block_H4'
+        assert s['protocol']['secondary_denominator'] == 'Spatial_H4_legacy'
+        assert s['protocol']['block_h4_grid'] == [100, 150], s['protocol']
+        for arm in ('G1', 'G2', 'G4', 'G8', 'G16', 'Block_H4',
+                    'Spatial_H4_legacy'):
             assert arm in s['splits']['dev']['correct']['mean_psnr'], arm
         import csv as _csv
         rows = list(_csv.DictReader(open(os.path.join(tmp, 'oracle',
@@ -370,23 +466,32 @@ def test_smoke_script_reaches_aggregation():
             r = [x for x in rows if x['state'] == state]
             assert len(r) == 2, state
             for arm in ('Base', 'R1', 'G1', 'G2', 'G4', 'G8', 'G16',
-                        'Spatial_H4', 'delta_G1_vs_R1', 'capture_G1'):
+                        'Block_H4', 'Spatial_H4_legacy', 'delta_G1_vs_R1',
+                        'capture_G1', 'capture_G1_vs_LegacyH4',
+                        'R1_q_mean', 'Block_H4_q_mean'):
                 assert arm in r[0], '%s missing from %s' % (arm, state)
+            # R1 is a q==1 gate: it must report a single-channel gate, not a
+            # 3-channel copy of D (mean/std are unaffected, the shape was not)
+            assert float(r[0]['R1_q_mean']) == 1.0
+            assert float(r[0]['R1_q_std']) == 0.0
         curve = list(_csv.DictReader(open(os.path.join(tmp, 'oracle',
                                                        'capture_curve.csv'),
                                          encoding='utf-8')))
         arms = {x['arm'] for x in curve}
-        assert arms == {'R1', 'G1', 'G2', 'G4', 'G8', 'G16', 'Spatial_H4'}, arms
-        # every grid must be monotonically >= R1 on the same aggregation
+        assert arms == {'R1', 'G1', 'G2', 'G4', 'G8', 'G16', 'Block_H4',
+                        'Spatial_H4_legacy'}, arms
+        for row in curve:
+            assert 'capture_vs_BlockH4' in row and 'capture_vs_LegacyH4' in row
+        # every gate must be >= R1 on the same aggregation. The guarantee is on
+        # continuous MSE; the reported PSNR is computed on 8-bit rounded images,
+        # so allow a hair of rounding wiggle rather than a bit-exact bound.
         for state in ('correct', 'true_dark_g0.5', 'mismatch'):
             r1 = [x for x in curve if x['arm'] == 'R1' and x['state'] == state][0]
-            for g in (1, 2, 4, 8, 16):
-                row = [x for x in curve if x['arm'] == 'G%d' % g
+            for arm in ('G1', 'G2', 'G4', 'G8', 'G16', 'Block_H4'):
+                row = [x for x in curve if x['arm'] == arm
                        and x['state'] == state][0]
-                # a q==1 gate is feasible for every block grid, so its optimum
-                # can never be worse in mean PSNR (1e-6 = float wiggle only)
-                assert float(row['mean_psnr']) >= float(r1['mean_psnr']) - 1e-6, \
-                    (state, g)
+                assert float(row['mean_psnr']) >= float(r1['mean_psnr']) - 2e-3, \
+                    (state, arm)
         assert '[repro] --limit 2: skipped' in out, out[-3000:]
         # §22: no checkpoint anywhere under the diagnostic root
         for dirpath, _dirs, files in os.walk(tmp):

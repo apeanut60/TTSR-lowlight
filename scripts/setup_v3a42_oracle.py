@@ -33,6 +33,9 @@ def main():
                     default='/root/data/experiments/v3a42_blockwise_oracle')
     ap.add_argument('--grids', default='1,2,4,8,16')
     ap.add_argument('--states', default='correct+true_dark_g0.5+mismatch')
+    ap.add_argument('--block_h4_factor', type=int, default=4,
+                    help='the same-family H/f endpoint (legacy spatial oracle '
+                         'keeps this resolution too)')
     a = ap.parse_args()
 
     grids = [int(g) for g in a.grids.split(',') if g.strip()]
@@ -56,6 +59,7 @@ def main():
         mismatch_dev_sha256=v4lock['mismatch_dev_sha256'],
         energy_stats_sha256=v4lock['energy_stats_sha256'],
         grids=','.join(str(g) for g in grids),
+        block_h4_factor=int(a.block_h4_factor),
         states=a.states,
         oracle_def_version=ORACLE_DEF_VERSION)
 
@@ -68,14 +72,20 @@ def main():
         # revision); every scientific field must not.
         diff = [k for k in lock if k != 'repo_commit' and old.get(k) != lock[k]]
         if diff:
-            raise SystemExit(
-                'existing V3-A.4.2 lock differs on %s -- refusing to overwrite a '
-                'frozen protocol; use a new --root for a new protocol'
-                % ', '.join(sorted(diff)))
+            results = os.path.join(a.root, 'oracle', 'summary.json')
+            if os.path.isfile(results):
+                raise SystemExit(
+                    'existing V3-A.4.2 lock differs on %s AND %s already holds a '
+                    'sweep -- refusing to mix two protocols under one root; use a '
+                    'new --root' % (', '.join(sorted(diff)), results))
+            print('note: no sweep under this root yet -> regenerating a changed '
+                  'protocol (%s)' % ', '.join(sorted(diff)))
     json.dump(lock, open(path, 'w', encoding='utf-8'), indent=2, sort_keys=True)
     print('V3-A.4.2 lock -> %s' % path)
     print('  commit   : %s' % lock['repo_commit'][:12])
     print('  grids    : %s' % lock['grids'])
+    print('  block_h4 : 1/%d of H and W, same family as the G curve'
+          % lock['block_h4_factor'])
     print('  states   : %s' % lock['states'])
     print('  oracle   : %s' % lock['oracle_def_version'])
     print('  proposal : %s' % lock['proposal_sha256'][:12])
