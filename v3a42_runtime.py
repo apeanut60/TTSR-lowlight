@@ -142,7 +142,7 @@ def block_index_map_from_base_grid(height, width, coarse_grid, base_grid):
 # ── §4 blockwise oracle ─────────────────────────────────────────────────────
 
 def blockwise_action_optimal_gate(y0, hr, d_correction, grid_size, eps=1e-8,
-                                  base_grid=None):
+                                  base_grid=None, edges=None):
     """-> dict(q_grid, q_full, Y_oracle, N_grid, Z_grid, nby, nbx).
 
     ``d_correction`` must already include the proposal gate (g_v2 * delta).
@@ -150,6 +150,12 @@ def blockwise_action_optimal_gate(y0, hr, d_correction, grid_size, eps=1e-8,
     ``base_grid`` -- when given, the blocks are unions of that finer grid's
     cells (see ``coarse_edges_from_base``); the default builds the partition
     directly on the pixel lattice.
+    ``edges`` -- an explicit (ey, ex) pair of pixel edge arrays. When given it
+    defines the partition exactly and ``grid_size``/``base_grid`` are ignored;
+    this is how a *verified* nested chain (V3-A.4.3) is applied without
+    re-deriving it here. The aggregation below is deliberately the only
+    implementation of the blockwise optimum, so the two call styles cannot
+    drift apart.
     """
     if y0.shape != hr.shape or y0.shape != d_correction.shape:
         raise ValueError('y0/hr/D must share a shape, got %s %s %s'
@@ -159,7 +165,10 @@ def blockwise_action_optimal_gate(y0, hr, d_correction, grid_size, eps=1e-8,
     N = ((hr - y0) * d_correction).sum(dim=1, keepdim=True)     # [B,1,H,W]
     Z = (d_correction ** 2).sum(dim=1, keepdim=True)
     gy, gx = as_grid_pair(grid_size)
-    if base_grid is None:
+    if edges is not None:
+        ey, ex = edges
+        idx, nby, nbx = _index_map(h, w, ey, ex)
+    elif base_grid is None:
         # hot path: read the cached (read-only) map instead of rebuilding it
         idx, nby, nbx = _block_index_map_cached(h, w, gy, gx)
     else:
