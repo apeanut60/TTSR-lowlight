@@ -29,7 +29,8 @@ sys.path.insert(0, ROOT)
 from v3a42_runtime import (block_index_map, blockwise_action_optimal_gate,  # noqa: E402
                            coarse_edges_from_base)
 from v3a43_runtime import (LEVELS, ORACLE_DEF_VERSION, build_level_chain,   # noqa: E402
-                           check_v3a42_reproduction, is_refinement,
+                           check_v3a42_reproduction, check_worktree,
+                           is_refinement,
                            level_geometry_report, linspace_index_edges,
                            mse_chain_violations, nested_index_chain,
                            refine_index_edges, saturation_metrics,
@@ -216,6 +217,23 @@ def test_reproduction_anchor_must_be_usable():
                  'undefined cap16 in our own run')
 
 
+# ── P1: provenance guards ───────────────────────────────────────────────────
+
+def test_formal_run_refuses_a_dirty_tree():
+    """A lock pins repo_commit, so a dirty tree must not produce formal numbers.
+    Deterministic: the decision is a pure function of (limit, head, dirty)."""
+    head, dirty = 'a' * 40, ['scripts/x.py', 'v3a43_runtime.py']
+    _expect_fail(lambda: check_worktree(0, head=head, dirty=dirty),
+                 'formal run on a dirty tree')
+    # a smoke run is allowed, but must say so out loud
+    h, d, warn = check_worktree(2, head=head, dirty=dirty)
+    assert h == head and d == dirty and warn and 'smoke run' in warn
+    assert 'NOT attributable' in warn
+    # a clean tree is silent and never raises, formal or not
+    for limit in (0, 2, 64):
+        assert check_worktree(limit, head=head, dirty=[]) == (head, [], None)
+
+
 # ── §20 lock ────────────────────────────────────────────────────────────────
 
 def _write_lock(tmp, commit=None, grids='1,2,4,8,16,32,64',
@@ -322,7 +340,7 @@ def test_setup_script_locks_the_real_nesting_scheme():
 def test_smoke_reaches_aggregation_and_repro_path():
     tmp = tempfile.mkdtemp(prefix='v3a43_smoke_')
     try:
-        _write_lock(tmp)
+        _path, lock = _write_lock(tmp)
         script = os.path.join(ROOT, 'scripts',
                               'diagnose_v3a43_fine_resolution.py')
         out = subprocess.check_output(
@@ -340,6 +358,14 @@ def test_smoke_reaches_aggregation_and_repro_path():
         assert s['protocol']['grids'] == list(GRIDS)
         assert s['protocol']['primary_denominator'] == 'Block_H4'
         assert s['protocol']['grid_scheme'] == 'verified_nested_from_block_h4'
+        # P1: the anchor actually used is the one the lock pinned, and the real
+        # worktree state is recorded instead of a hard-coded zero
+        assert s['protocol']['repro_anchor'] == lock['v3a42_summary_path']
+        assert s['protocol']['repro_anchor_source'] == 'artifact_lock.json'
+        assert s['protocol']['git_head'] == lock['repo_commit']
+        assert len(s['protocol']['git_dirty']) == \
+            min(s['protocol']['git_dirty_count'], 20)
+        assert 'smoke run' in out, out[-1500:]       # dirty smoke must say so
         assert s['nesting_summary']['all_nested'] is True
         assert s['nesting_summary']['mse_chain_violations'] == 0
         for arm in ('R1', 'G16', 'G32', 'G64', 'Block_H4', 'Spatial_H4_legacy'):

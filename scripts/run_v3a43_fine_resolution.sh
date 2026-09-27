@@ -3,8 +3,10 @@
 #
 #   tmux new -s v3a43 -d 'bash scripts/run_v3a43_fine_resolution.sh'
 #
-# The lock pins the current git HEAD and the frozen V3-A.4.2 summary, so COMMIT
-# FIRST -- step 2 re-runs setup and refuses a dirty protocol.
+# The lock pins the current git HEAD and the frozen V3-A.4.2 summary, and step 3
+# REFUSES to run --limit 0 on a dirty working tree (a lock cannot vouch for
+# uncommitted code). So COMMIT FIRST: step 2 then re-locks the committed
+# revision and the whole run is attributable to it.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 

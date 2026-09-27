@@ -41,14 +41,17 @@ from option import parser as option_parser                        # noqa: E402
 from v3a42_runtime import (blockwise_action_optimal_gate,         # noqa: E402
                            h4_block_grid, spatial_oracle_q4)
 from v3a43_runtime import (build_level_chain, check_v3a42_reproduction,  # noqa: E402
-                           level_geometry_report, mse_chain_violations,
+                           check_worktree, level_geometry_report,
+                           mse_chain_violations,
                            saturation_metrics, verify_v3a43_artifact_lock)
 from v3a4_runtime import load_r1_proposal_strict                  # noqa: E402
 from v3a_runtime import exposure_gain                             # noqa: E402
 
 SRC = '/root/data/experiments/v3a1_lolv2real'
 V4 = '/root/data/experiments/v3a4_lolv2real'
-V42 = '/root/data/experiments/v3a42_blockwise_oracle'
+# NOTE: the V3-A.4.2 reproduction anchor is NOT configured here -- it is read
+# from artifact_lock.json (see main), so the anchor cannot be swapped at run
+# time while the lock validates a different file.
 R1_CK = 'R1_v2stable_naive_s42/checkpoint_03000.pt'
 STATES = ('correct', 'true_dark_g0.5', 'mismatch')
 BLOCK_ARM = 'Block_H4'
@@ -114,7 +117,6 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument('--src_root', default=SRC)
     ap.add_argument('--v4_root', default=V4)
-    ap.add_argument('--v3a42_root', default=V42)
     ap.add_argument('--root',
                     default='/root/data/experiments/v3a43_fine_resolution')
     ap.add_argument('--data_dir', default='/root/data/datasets/lol-v2-real')
@@ -146,18 +148,19 @@ def main():
     if not split_tags:
         raise SystemExit('--splits is empty')
 
-    v42_summary = os.path.join(a.v3a42_root, 'oracle', 'summary.json')
-    if a.limit == 0 and not os.path.isfile(v42_summary):
-        raise SystemExit('the V3-A.4.2 reproduction anchor %s does not exist -- a '
-                         '--limit 0 run must be able to reproduce G16 / Block_H4 / '
-                         'Spatial_H4_legacy against it (§21); use --limit N for a '
-                         'smoke run' % v42_summary)
+    # §20/P1: a formal sweep must be attributable to one revision. Checked
+    # before anything else so a dirty tree costs seconds, not 20 minutes.
+    git_head, git_dirty, wt_warning = check_worktree(a.limit)
 
     os.makedirs(os.path.join(a.root, 'oracle'), exist_ok=True)
     os.makedirs(os.path.join(a.root, 'logs'), exist_ok=True)
     log = _Tee(os.path.join(a.root, 'logs', 'diagnose_fine_resolution.log'))
 
     lock = verify_v3a43_artifact_lock(a.root, a.src_root, v4_root=a.v4_root)
+    # P1: the LOCK is the source of truth for the reproduction anchor. Deriving
+    # it from a CLI flag would let the lock validate summary A while the
+    # reproduction actually read summary B.
+    v42_summary = lock['v3a42_summary_path']
     locked_grids = [int(g) for g in str(lock['grids']).split(',') if g.strip()]
     extra = [g for g in grids if g not in locked_grids]
     if extra:
@@ -185,6 +188,10 @@ def main():
     log('  states     : %s' % ','.join(STATES))
     log('  limit      : %s' % (a.limit or 'none'))
     log('  repro anchor: %s' % (v42_summary if a.limit == 0 else 'skipped'))
+    log('  git        : %s  dirty=%d' % ((git_head or 'unknown')[:8],
+                                         len(git_dirty)))
+    if wt_warning:
+        log('  git WARNING: %s' % wt_warning)
     log()
 
     ns = option_parser.parse_args([])
@@ -400,15 +407,19 @@ def main():
         oracle_def_version=lock['oracle_def_version'],
         grids=grids, levels=levels, arms=arms, ladder=ladder,
         states=list(STATES), splits=split_tags, limit=a.limit,
-        src_root=a.src_root, v4_root=a.v4_root, v3a42_root=a.v3a42_root,
+        src_root=a.src_root, v4_root=a.v4_root,
         data_dir=a.data_dir, variant=a.variant, cache_name=a.cache_name,
         proposal_ckpt=R1_CK, repro_anchor=v42_summary,
+        repro_anchor_source='artifact_lock.json',
         oracle_objective='continuous_rgb_mse_on_[-1,1]_tensors',
         primary_denominator=BLOCK_ARM, secondary_denominator=LEGACY_ARM,
         grid_scheme='verified_nested_from_block_h4',
         nesting_scheme=lock['nesting_scheme'],
         block_h4_factor=factor, block_h4_grid=nesting_geo[0]['base_grid'],
-        lock_repo_commit=lock.get('repo_commit'), git_dirty_count=0),
+        lock_repo_commit=lock.get('repo_commit'),
+        # the REAL worktree state, never a hard-coded zero
+        git_head=git_head, git_dirty_count=len(git_dirty),
+        git_dirty=git_dirty[:20]),
         repro=repro, nesting_summary=dict(
             all_nested=nesting['all_nested'], scheme=nesting['scheme'],
             mse_chain_checked=n_checked[0], mse_chain_violations=0),

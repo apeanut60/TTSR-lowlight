@@ -208,6 +208,30 @@ def check_v3a42_reproduction(got_state, ref_state, tol_psnr=2e-3, tol_capture=1e
                 ok=not mism, mismatches=mism)
 
 
+def check_worktree(limit, head=None, dirty=None):
+    """-> (head, dirty, warning_or_None); raises for a formal run on a dirty tree.
+
+    A lock pins ``repo_commit``, so an uncommitted change means the recorded
+    commit is NOT the code that ran. A smoke run (``--limit > 0``) is allowed to
+    be dirty and only warns; a formal run (``--limit 0``) refuses, because its
+    numbers are supposed to be attributable to one revision.
+    """
+    if head is None or dirty is None:
+        head, dirty = git_state()
+    dirty = list(dirty or [])
+    if not dirty:
+        return head, dirty, None
+    msg = ('working tree is dirty (%d path(s), e.g. %s)'
+           % (len(dirty), ', '.join(dirty[:3])))
+    if int(limit) == 0:
+        raise SystemExit(
+            '%s -- a formal run (--limit 0) must be attributable to %s alone; '
+            'commit the revision and rerun scripts/setup_v3a43_fine_resolution.py'
+            % (msg, (head or 'HEAD')[:8]))
+    return head, dirty, ('%s -- smoke run (--limit %d), NOT attributable to %s '
+                         'alone' % (msg, int(limit), (head or 'HEAD')[:8]))
+
+
 def mse_chain_violations(mses, arms):
     """Continuous-MSE must be non-increasing along the nested ladder (§13)."""
     bad = []
@@ -263,13 +287,9 @@ def verify_v3a43_artifact_lock(root, src_root,
     if lock.get('oracle_def_version') != ORACLE_DEF_VERSION:
         raise SystemExit('oracle definition changed since the lock (%s vs %s)'
                          % (lock.get('oracle_def_version'), ORACLE_DEF_VERSION))
-    head, dirty = git_state()
+    head, _dirty = git_state()          # dirtiness itself is check_worktree's job
     if head and lock.get('repo_commit') and lock['repo_commit'] != head:
         raise SystemExit('v3a43 lock generated at %s but HEAD is %s -- rerun '
                          'scripts/setup_v3a43_fine_resolution.py'
                          % (lock['repo_commit'][:8], head[:8]))
-    if dirty:
-        print('[v3a43] WARNING: working tree is dirty (%d path(s), e.g. %s) -- '
-              'the run cannot be attributed to %s alone'
-              % (len(dirty), ', '.join(dirty[:3]), (head or 'HEAD')[:8]))
     return lock
