@@ -31,8 +31,10 @@ from v3a41_runtime import (global_action_optimal_gate,          # noqa: E402
                            qopt_components)
 from v3a42_runtime import (ORACLE_DEF_VERSION, block_edges,     # noqa: E402
                            as_grid_pair, block_index_map,
+                           block_index_map_from_base_grid,
                            blockwise_action_optimal_gate,
                            check_v3a41_reproduction,
+                           coarse_edges_from_base,
                            global_action_optimal_gate_reference,
                            h4_block_grid,
                            spatial_action_optimal_gate, spatial_oracle_q4,
@@ -136,6 +138,78 @@ def test_block_h4_dominates_g16_when_the_partitions_nest():
     for grid in (1, 4, 8, 16):
         assert blk <= ms[str(grid)] + 1e-12, (grid, blk, ms)
     assert abs(blk - ms['(32, 32)']) < 1e-12     # the H/4 endpoint IS G=32 here
+
+
+def test_real_geometry_grids_are_unions_of_base_cells():
+    """400x600 (the actual LOLv2-real size): every G block must be a whole
+    number of Block_H4 cells. This is what makes the resolution curve a nested
+    family chain instead of a resolution + boundary-alignment mixture."""
+    H, W = 400, 600
+    base = h4_block_grid(H, W, 4)
+    assert base == (100, 150)
+    base_idx, nby_b, nbx_b = block_index_map(H, W, base)
+    n_base = nby_b * nbx_b
+    assert n_base == 100 * 150
+    assert np.bincount(base_idx, minlength=n_base).min() == 16   # 4x4 px cells
+    # the base pixel edges are the multiples of 4 that the coarse edges must use
+    ey_b = coarse_edges_from_base(H, 100, 100)
+    assert list(ey_b[:3]) == [0, 4, 8] and ey_b[-1] == H
+    for G in GRIDS:
+        idx, nby, nbx = block_index_map_from_base_grid(H, W, G, base)
+        n_coarse = nby * nbx
+        assert sorted(set(idx.tolist())) == list(range(n_coarse))
+        assert int(np.bincount(idx, minlength=n_coarse).sum()) == H * W
+        # no base cell may be split across two coarse blocks: each base cell
+        # maps into exactly ONE coarse block
+        comb = base_idx.astype(np.int64) * n_coarse + idx
+        uniq = np.unique(comb)
+        assert len(uniq) == len(np.unique(uniq // n_coarse)), G
+        assert len(uniq) == n_base, (G, len(uniq), n_base)
+        # every coarse block is on the base lattice: its edges are base edges
+        cy = coarse_edges_from_base(H, 100, G)
+        assert set(cy.tolist()) <= set(ey_b.tolist()), G
+        assert cy[0] == 0 and cy[-1] == H and len(cy) <= G + 1, (G, cy)
+        assert np.all(np.diff(cy) >= 4), (G, cy)   # >= one whole base cell
+
+
+def test_real_geometry_block_h4_dominates_every_grid():
+    """The property the primary denominator depends on, on the REAL geometry:
+    MSE(Block_H4) <= MSE(all coarsenings of it), continuous-MSE (not rounded
+    PSNR), for random data at 400x600."""
+    y0, hr, D = _rand(21, h=400, w=600)
+    base = h4_block_grid(400, 600, 4)
+    mse = {}
+    for G in GRIDS:
+        o = blockwise_action_optimal_gate(y0, hr, D, G, base_grid=base)
+        mse[G] = float((o['Y_oracle'] - hr).pow(2).mean())
+    ob = blockwise_action_optimal_gate(y0, hr, D, base)
+    mse['Block_H4'] = float((ob['Y_oracle'] - hr).pow(2).mean())
+    mse['R1'] = float((y0 + D - hr).pow(2).mean())
+    for G in GRIDS:
+        assert mse['Block_H4'] <= mse[G] + 1e-12, (G, mse)
+        assert mse[G] <= mse['R1'] + 1e-12, (G, mse)
+    # nesting implies the coarse-to-fine MSE sequence is non-increasing
+    assert mse[16] <= mse[8] <= mse[4] <= mse[2] <= mse[1] <= mse['R1'] + 1e-12
+    # the raw pixel-lattice grid does NOT have this property in general
+    raw = blockwise_action_optimal_gate(y0, hr, D, 16)
+    assert float((raw['Y_oracle'] - hr).pow(2).mean()) != mse[16]
+
+
+def test_nested_gate_is_a_feasible_subset_not_a_new_family():
+    """Union-of-cells construction: merging 2x2 base cells must reproduce the
+    exact optimum of the merged-block family (same closed form, same data)."""
+    y0, hr, D = _rand(22, h=64, w=96)
+    base = h4_block_grid(64, 96, 4)                     # (16, 24)
+    merged = block_index_map_from_base_grid(64, 96, 8, base)
+    idx, nby, nbx = merged
+    # 16 base cells in y -> 2 per group (8 px); 24 in x -> 3 per group (12 px)
+    assert np.bincount(idx, minlength=nby * nbx).min() == 8 * 12
+    o = blockwise_action_optimal_gate(y0, hr, D, 8, base_grid=base)
+    assert (o['nby'], o['nbx']) == (nby, nbx)
+    # the coarsening is strictly weaker than the base family
+    ob = blockwise_action_optimal_gate(y0, hr, D, base)
+    assert float((ob['Y_oracle'] - hr).pow(2).mean()) <= \
+        float((o['Y_oracle'] - hr).pow(2).mean()) + 1e-12
 
 
 def test_block_oracle_continuous_mse_never_worse_than_r1():
@@ -432,6 +506,48 @@ def test_full_run_without_the_repro_anchor_fails_before_the_sweep():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_locked_protocol_fields_are_consumed_not_ignored():
+    """P1/P2: the lock's block_h4_factor and states must actually steer the run.
+
+    A lock claiming factor=8 (or a different state list) used to be silently
+    ignored while the diagnostic ran H/4 with its hard-coded constants -- a
+    provenance lie. Both must now hard-fail.
+    """
+    script = os.path.join(ROOT, 'scripts', 'diagnose_v3a42_blockwise_oracle.py')
+    setup = os.path.join(ROOT, 'scripts', 'setup_v3a42_oracle.py')
+    tmp = tempfile.mkdtemp(prefix='v3a42_lockfields_')
+    try:
+        # setup itself must refuse to write a factor it cannot honour
+        try:
+            subprocess.check_output([sys.executable, setup, '--root', tmp,
+                                     '--block_h4_factor', '8'],
+                                    stderr=subprocess.STDOUT)
+        except subprocess.CalledProcessError as e:
+            assert b'defined at H/4' in (e.output or b''), e.output
+        else:
+            raise AssertionError('setup accepted block_h4_factor=8')
+
+        path, lock = _write_lock(tmp)
+        for field, value, needle in (('block_h4_factor', 8, 'defined at H/4'),
+                                     ('states', 'correct', 'lock states')):
+            bad = dict(lock)
+            bad[field] = value
+            json.dump(bad, open(path, 'w', encoding='utf-8'))
+            try:
+                out = subprocess.check_output(
+                    [sys.executable, '-W', 'ignore', script, '--root', tmp,
+                     '--splits', 'dev', '--limit', '1'],
+                    stderr=subprocess.STDOUT).decode()
+            except subprocess.CalledProcessError as e:
+                out = (e.output or b'').decode()
+                assert needle in out, (field, out[-600:])
+            else:
+                raise AssertionError('a lock with %s=%r was ignored: %s'
+                                     % (field, value, out[-600:]))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def _repro_case(g1_psnr=20.5, legacy_psnr=20.8, r1_psnr=20.0, ref_capture=0.625):
     """Synthetic slice with DIFFERENT primary and legacy captures.
 
@@ -505,6 +621,8 @@ def test_smoke_script_reaches_aggregation():
         assert s['protocol']['grids'] == [1, 2, 4, 8, 16]
         assert s['protocol']['primary_denominator'] == 'Block_H4'
         assert s['protocol']['secondary_denominator'] == 'Spatial_H4_legacy'
+        assert s['protocol']['grid_scheme'] == 'nested_base_h4'
+        assert s['protocol']['block_h4_factor'] == 4
         assert s['protocol']['block_h4_grid'] == [100, 150], s['protocol']
         for arm in ('G1', 'G2', 'G4', 'G8', 'G16', 'Block_H4',
                     'Spatial_H4_legacy'):

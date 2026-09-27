@@ -34,8 +34,8 @@ def main():
     ap.add_argument('--grids', default='1,2,4,8,16')
     ap.add_argument('--states', default='correct+true_dark_g0.5+mismatch')
     ap.add_argument('--block_h4_factor', type=int, default=4,
-                    help='the same-family H/f endpoint (legacy spatial oracle '
-                         'keeps this resolution too)')
+                    help='the same-family H/f endpoint (fixed at 4: the legacy '
+                         'V3-A.4.1 anchor only exists at H/4)')
     a = ap.parse_args()
 
     grids = [int(g) for g in a.grids.split(',') if g.strip()]
@@ -44,6 +44,12 @@ def main():
     if 1 not in grids:
         raise SystemExit('--grids must contain 1: the 1x1 block oracle IS the '
                          'V3-A.4.1 Global-AO and is the reproduction anchor')
+    # a lock that claims a factor the diagnostic will not run is worse than no
+    # lock at all, so refuse to record anything other than H/4
+    if int(a.block_h4_factor) != 4:
+        raise SystemExit('V3-A.4.2 is defined at H/4 (--block_h4_factor 4); %d '
+                         'would have to be a new experiment with a new anchor'
+                         % a.block_h4_factor)
 
     v4lock = verify_v3a4_artifact_lock(a.v4_root, a.src_root)
     lock = dict(

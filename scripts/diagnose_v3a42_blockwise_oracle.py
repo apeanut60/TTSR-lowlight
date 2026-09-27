@@ -191,10 +191,23 @@ def main():
         raise SystemExit('--grids %r asks for %r which the lock does not cover '
                          '(locked: %r) -- rerun scripts/setup_v3a42_oracle.py'
                          % (a.grids, missing, lock['grids']))
+    # consume the locked protocol instead of hard-coding it: a lock that claims
+    # a different endpoint resolution must not silently run H/4 anyway
+    factor = int(lock['block_h4_factor'])
+    if factor != 4:
+        raise SystemExit('this experiment is defined at H/4 (factor=4); the lock '
+                         'says factor=%d -- the legacy V3-A.4.1 anchor is only '
+                         'reproducible at H/4' % factor)
+    if lock.get('states') != '+'.join(STATES):
+        raise SystemExit('lock states %r != the states this diagnostic computes '
+                         '(%r) -- rerun scripts/setup_v3a42_oracle.py'
+                         % (lock.get('states'), '+'.join(STATES)))
 
     log('V3-A.4.2 true blockwise gate-resolution oracle')
     log('  oracle def : %s' % lock['oracle_def_version'])
     log('  grids      : %s' % ','.join(str(g) for g in grids))
+    log('  grid scheme: G arms coarsen the Block_H4 base grid (nested families)')
+    log('  h4 factor  : 1/%d (from the lock)' % factor)
     log('  splits     : %s' % ','.join(split_tags))
     log('  states     : %s' % ','.join(STATES))
     log('  limit      : %s' % (a.limit or 'none'))
@@ -257,20 +270,26 @@ def main():
                     # R1 is q = 1 by construction (sr == Y0 + D)
                     vals['R1'] = metrics(sr, hrd)[0]
                     qmap['R1'] = torch.ones_like(D[:, :1])
+                    # the single base partition every G arm coarsens
+                    base_grid = h4_block_grid(y0d.shape[-2], y0d.shape[-1],
+                                              factor)
+                    block_h4_grid[0] = base_grid
                     for g in grids:
-                        o = blockwise_action_optimal_gate(y0d, hrd, D, g)
+                        # the G arms COARSEN the Block_H4 base grid, so every
+                        # G block is a union of whole base cells and the family
+                        # chain is exactly nested (MSE(Block_H4) <= MSE(G))
+                        o = blockwise_action_optimal_gate(y0d, hrd, D, g,
+                                                          base_grid=base_grid)
                         arm = 'G%d' % g
                         vals[arm] = metrics(y0d + o['q_full'] * D, hrd)[0]
                         qmap[arm] = o['q_grid']
                     # same family as the G curve, only the resolution changes
-                    gy, gx = h4_block_grid(y0d.shape[-2], y0d.shape[-1], 4)
-                    block_h4_grid[0] = (gy, gx)
-                    ob = blockwise_action_optimal_gate(y0d, hrd, D, (gy, gx))
+                    ob = blockwise_action_optimal_gate(y0d, hrd, D, base_grid)
                     vals['Block_H4'] = metrics(y0d + ob['q_full'] * D, hrd)[0]
                     qmap['Block_H4'] = ob['q_grid']
                     # legacy V3-A.4.1 formulation: area-downsample the *data*,
                     # solve there, then bilinearly expand the gate
-                    q4 = spatial_oracle_q4(y0d, hrd, D)
+                    q4 = spatial_oracle_q4(y0d, hrd, D, factor=factor)
                     qf = F.interpolate(q4, size=y0d.shape[-2:], mode='bilinear',
                                        align_corners=False)
                     vals['Spatial_H4_legacy'] = metrics(y0d + qf * D, hrd)[0]
@@ -397,6 +416,8 @@ def main():
         oracle_objective='continuous_rgb_mse_on_[-1,1]_tensors',
         primary_denominator='Block_H4',
         secondary_denominator='Spatial_H4_legacy',
+        grid_scheme='nested_base_h4',
+        block_h4_factor=factor,
         block_h4_grid=block_h4_grid[0],
         lock_repo_commit=lock.get('repo_commit'), git_head=head,
         git_dirty=dirty[:20], git_dirty_count=len(dirty)),

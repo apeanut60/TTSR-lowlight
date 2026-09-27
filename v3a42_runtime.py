@@ -28,8 +28,8 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-ORACLE_DEF_VERSION = ('v3a42b:blockwise-piecewise-constant-nearest'
-                      '+block-h4-endpoint')
+ORACLE_DEF_VERSION = ('v3a42c:blockwise-piecewise-constant-nearest'
+                      '+nested-base-h4-grid')
 
 
 # ── §6 deterministic, gap-free block partition ──────────────────────────────
@@ -70,17 +70,24 @@ def h4_block_grid(height, width, factor=4):
 
 
 @lru_cache(maxsize=256)
-def _block_index_map_cached(height, width, gy, gx):
-    ey = block_edges(height, gy)
-    ex = block_edges(width, gx)
+def _index_map_from_edges(height, width, ey, ex):
+    """Cached on the edge tuples; the returned map is read-only by convention."""
     nby, nbx = len(ey) - 1, len(ex) - 1
     idx = np.empty((height, width), dtype=np.int64)
     for i in range(nby):
         for j in range(nbx):
             idx[ey[i]:ey[i + 1], ex[j]:ex[j + 1]] = i * nbx + j
-    # NOTE: this cached map is read-only *by convention*; `block_index_map`
-    # hands out a copy so no caller can turn it into mutable shared state.
     return idx.reshape(-1), nby, nbx
+
+
+def _index_map(height, width, ey, ex):
+    return _index_map_from_edges(int(height), int(width),
+                                 tuple(int(v) for v in ey),
+                                 tuple(int(v) for v in ex))
+
+
+def _block_index_map_cached(height, width, gy, gx):
+    return _index_map(height, width, block_edges(height, gy), block_edges(width, gx))
 
 
 def block_index_map(height, width, grid_size):
@@ -89,19 +96,60 @@ def block_index_map(height, width, grid_size):
     Every pixel is assigned exactly one block; no gaps, no overlap. The result
     is a private copy: the cached map must not become mutable shared state.
     ``grid_size`` is an int or a (Gy, Gx) pair.
+
+    The edges come from the raw pixel lattice. Use
+    ``block_index_map_from_base_grid`` when the coarse blocks must be exact
+    unions of a finer base partition.
     """
     gy, gx = as_grid_pair(grid_size)
     idx, nby, nbx = _block_index_map_cached(int(height), int(width), gy, gx)
     return idx.copy(), nby, nbx
 
 
+def coarse_edges_from_base(length, base_grid, coarse_grid):
+    """Pixel edges of a coarse partition whose blocks are WHOLE base cells.
+
+    ``round(linspace(0, n_base, G+1))`` picks base-cell boundaries, which are
+    then mapped to pixel coordinates. Building the G grid independently on the
+    pixel lattice instead would let a G block cut a base cell in half -- then a
+    finer endpoint is not a superset of the coarser family and
+    ``PSNR(G) > PSNR(finer)`` becomes possible for a pure *boundary alignment*
+    reason rather than a resolution one.
+    """
+    ey_base = block_edges(length, base_grid)
+    n_base = len(ey_base) - 1
+    if coarse_grid <= 1:
+        return np.array([0, int(length)])
+    iy = np.round(np.linspace(0.0, float(n_base),
+                              int(coarse_grid) + 1)).astype(np.int64)
+    iy = np.unique(np.clip(iy, 0, n_base))
+    if iy.size < 2 or iy[0] != 0 or iy[-1] != n_base:
+        iy = np.array([0, n_base])
+    return ey_base[iy]
+
+
+def block_index_map_from_base_grid(height, width, coarse_grid, base_grid):
+    """Same as ``block_index_map`` but every coarse block is a union of base
+    cells: F_G is a subset of F_base, so MSE(F_base) <= MSE(F_G)."""
+    by, bx = as_grid_pair(base_grid)
+    cy, cx = as_grid_pair(coarse_grid)
+    idx, nby, nbx = _index_map(height, width,
+                               coarse_edges_from_base(height, by, cy),
+                               coarse_edges_from_base(width, bx, cx))
+    return idx.copy(), nby, nbx
+
+
 # ── §4 blockwise oracle ─────────────────────────────────────────────────────
 
-def blockwise_action_optimal_gate(y0, hr, d_correction, grid_size, eps=1e-8):
+def blockwise_action_optimal_gate(y0, hr, d_correction, grid_size, eps=1e-8,
+                                  base_grid=None):
     """-> dict(q_grid, q_full, Y_oracle, N_grid, Z_grid, nby, nbx).
 
     ``d_correction`` must already include the proposal gate (g_v2 * delta).
     ``grid_size`` is an int (square grid) or a (Gy, Gx) pair.
+    ``base_grid`` -- when given, the blocks are unions of that finer grid's
+    cells (see ``coarse_edges_from_base``); the default builds the partition
+    directly on the pixel lattice.
     """
     if y0.shape != hr.shape or y0.shape != d_correction.shape:
         raise ValueError('y0/hr/D must share a shape, got %s %s %s'
@@ -111,8 +159,14 @@ def blockwise_action_optimal_gate(y0, hr, d_correction, grid_size, eps=1e-8):
     N = ((hr - y0) * d_correction).sum(dim=1, keepdim=True)     # [B,1,H,W]
     Z = (d_correction ** 2).sum(dim=1, keepdim=True)
     gy, gx = as_grid_pair(grid_size)
-    # hot path: read the cached (read-only) map instead of rebuilding it
-    idx, nby, nbx = _block_index_map_cached(h, w, gy, gx)
+    if base_grid is None:
+        # hot path: read the cached (read-only) map instead of rebuilding it
+        idx, nby, nbx = _block_index_map_cached(h, w, gy, gx)
+    else:
+        by, bx = as_grid_pair(base_grid)
+        idx, nby, nbx = _index_map(h, w,
+                                   coarse_edges_from_base(h, by, gy),
+                                   coarse_edges_from_base(w, bx, gx))
     nblk = nby * nbx
     t = torch.as_tensor(idx, dtype=torch.long, device=y0.device)
     Nf = N.reshape(b, -1)
