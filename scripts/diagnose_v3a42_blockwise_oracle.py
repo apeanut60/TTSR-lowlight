@@ -61,6 +61,7 @@ from local_refine_runtime import metrics                          # noqa: E402
 from model.V3A4Verifier import V3A4Refiner                        # noqa: E402
 from option import parser as option_parser                        # noqa: E402
 from v3a42_runtime import (blockwise_action_optimal_gate,         # noqa: E402
+                           check_v3a41_reproduction,
                            git_state,
                            h4_block_grid,
                            spatial_oracle_q4,
@@ -321,14 +322,23 @@ def main():
                 capture[arm].update(
                     _prefixed('legacy', capture_stats(
                         acc[s]['R1'], acc[s][arm], acc[s]['Spatial_H4_legacy'])))
-            seq = ['G%d' % g for g in grids] + ['Block_H4', 'Spatial_H4_legacy']
+            # the resolution curve stops at Block_H4: it is the SAME family as
+            # the G arms. Legacy-H4 is a different formulation, so a
+            # "Block_H4 -> Legacy" step is not a resolution marginal gain and
+            # must never be read as one (§13/§17).
+            seq = ['G%d' % g for g in grids] + ['Block_H4']
             marginal, prev = {}, 'R1'
             for arm in seq:
                 marginal['%s->%s' % (prev, arm)] = mean_psnr[arm] - mean_psnr[prev]
                 prev = arm
+            legacy_marginal = dict(
+                Spatial_H4_legacy_vs_R1=mean_psnr['Spatial_H4_legacy'] - r1,
+                Spatial_H4_legacy_vs_Block_H4=(mean_psnr['Spatial_H4_legacy']
+                                               - mean_psnr['Block_H4']))
             res[s] = dict(mean_psnr=mean_psnr, mean_base=float(np.mean(bases)),
                           H_S_block_h4=h_block, H_S_legacy_h4=h_legacy,
                           capture=capture, marginal_gain=marginal,
+                          legacy_marginal=legacy_marginal,
                           q_stats={arm: mean_gate_stats(qacc[s][arm])
                                    for arm in arms})
         out[tag] = res
@@ -349,21 +359,20 @@ def main():
                 ref = base.get(tag, {}).get(s)
                 if ref is None:
                     continue
-                got = out[tag][s]
-                d_psnr = abs(got['mean_psnr']['G1'] - ref['Global_AO'])
-                d_spat = abs(got['mean_psnr']['Spatial_H4_legacy']
-                             - ref['Spatial_AO'])
-                d_cap = abs(got['capture']['G1']['capture'] - ref['capture_global'])
-                row = dict(split=tag, state=s, psnr_G1=got['mean_psnr']['G1'],
-                           psnr_G1_v3a41=ref['Global_AO'], d_psnr=d_psnr,
-                           psnr_S=got['mean_psnr']['Spatial_H4_legacy'],
-                           psnr_S_v3a41=ref['Spatial_AO'], d_psnr_spatial=d_spat,
-                           capture_G1=got['capture']['G1']['capture'],
-                           capture_v3a41=ref['capture_global'], d_capture=d_cap)
+                # capture_legacy (V3-A.4.1's denominator), never our primary
+                # Block_H4 capture -- see check_v3a41_reproduction's docstring
+                row = check_v3a41_reproduction(out[tag][s], ref,
+                                               tol_capture=CAP_TOL,
+                                               tol_psnr=PSNR_TOL)
+                row.update(split=tag, state=s)
                 repro['rows'].append(row)
-                log('[repro] %-5s %-16s dPSNR(G1)=%.2e dPSNR(S)=%.2e dcap=%.2e'
-                    % (tag, s, d_psnr, d_spat, d_cap))
-                if d_psnr > PSNR_TOL or d_spat > PSNR_TOL or d_cap > CAP_TOL:
+                prim = row['capture_G1_primary']
+                log('[repro] %-5s %-16s dPSNR(G1)=%.2e dPSNR(LegacyH4)=%.2e '
+                    'd_capture[%s]=%.2e  (primary capture %.3f, not compared)'
+                    % (tag, s, row['d_psnr'], row['d_psnr_spatial'],
+                       row['denominator'], row['d_capture'],
+                       prim if prim is not None else float('nan')))
+                if not row['ok']:
                     bad.append('%s/%s' % (tag, s))
         repro['checked'] = True
         repro['matched'] = not bad
@@ -408,6 +417,8 @@ def main():
             for arm in arms:
                 mp = out[tag][s]['mean_psnr'][arm]
                 cap = out[tag][s]['capture'].get(arm, {})
+                # a legacy row is NOT a step of the resolution curve
+                step = (None if arm == 'Spatial_H4_legacy' else mp - prev)
                 curve_rows.append(dict(
                     split=tag, state=s, arm=arm, mean_psnr=mp,
                     H_vs_R1=mp - r1,
@@ -416,7 +427,8 @@ def main():
                     per_image_capture_block_mean=cap.get('block_per_image_mean'),
                     per_image_capture_block_n=cap.get('block_n_valid'),
                     per_image_capture_legacy_mean=cap.get('legacy_per_image_mean'),
-                    marginal_gain_vs_prev=mp - prev))
+                    marginal_gain_vs_prev=step,
+                    is_resolution_step=(arm != 'Spatial_H4_legacy')))
                 prev = mp
     with open(os.path.join(a.root, 'oracle', 'capture_curve.csv'), 'w',
               newline='', encoding='utf-8') as f:
@@ -484,6 +496,9 @@ def main():
             m = out[tag][s]['marginal_gain']
             log('  %-5s %-16s %s' % (tag, s, '  '.join(
                 '%s %+.4f' % (k, v) for k, v in m.items())))
+            lm = out[tag][s]['legacy_marginal']
+            log('  %-5s %-16s [legacy anchor, not a resolution step] %s'
+                % (tag, s, '  '.join('%s %+.4f' % (k, v) for k, v in lm.items())))
     log()
     log('artifacts -> %s/oracle/{summary.json, per_image.csv, capture_curve.csv}'
         % a.root)

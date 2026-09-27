@@ -32,6 +32,7 @@ from v3a41_runtime import (global_action_optimal_gate,          # noqa: E402
 from v3a42_runtime import (ORACLE_DEF_VERSION, block_edges,     # noqa: E402
                            as_grid_pair, block_index_map,
                            blockwise_action_optimal_gate,
+                           check_v3a41_reproduction,
                            global_action_optimal_gate_reference,
                            h4_block_grid,
                            spatial_action_optimal_gate, spatial_oracle_q4,
@@ -431,6 +432,57 @@ def test_full_run_without_the_repro_anchor_fails_before_the_sweep():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def _repro_case(g1_psnr=20.5, legacy_psnr=20.8, r1_psnr=20.0, ref_capture=0.625):
+    """Synthetic slice with DIFFERENT primary and legacy captures.
+
+    headroom:  G1 = 0.5, Block_H4 = 1.0, Legacy_H4 = 0.8
+    -> primary capture = 0.50, legacy capture = 0.625
+    V3-A.4.1 reported capture_global with the LEGACY denominator, so its value
+    is 0.625 and the comparison must use capture_legacy.
+    """
+    got = dict(
+        mean_psnr={'R1': r1_psnr, 'G1': g1_psnr,
+                   'Block_H4': r1_psnr + 1.0,
+                   'Spatial_H4_legacy': legacy_psnr},
+        capture={'G1': dict(capture=0.50, capture_legacy=0.625)},
+        H_S_block_h4=1.0, H_S_legacy_h4=0.8)
+    ref = dict(Global_AO=g1_psnr, Spatial_AO=legacy_psnr,
+               capture_global=ref_capture)
+    return got, ref
+
+
+def test_reproduction_check_uses_the_legacy_denominator():
+    """The V3-A.4.1 capture must be compared against capture_legacy.
+
+    Comparing the primary Block_H4 capture (0.50) against V3-A.4.1's 0.625
+    would hard-fail a correct sweep -- that is the bug this pins down.
+    """
+    got, ref = _repro_case()
+    row = check_v3a41_reproduction(got, ref)
+    assert row['denominator'] == 'capture_legacy'
+    assert row['capture_G1_legacy'] == 0.625
+    assert row['capture_G1_primary'] == 0.50           # recorded, not compared
+    assert row['capture_v3a41'] == 0.625
+    assert row['d_capture'] == 0.0
+    assert row['ok'] and row['mismatches'] == [], row
+    # the same inputs through the WRONG denominator must be caught
+    wrong = abs(row['capture_G1_primary'] - ref['capture_global'])
+    assert wrong > row['tol_capture']
+    # a baseline that genuinely moved is still flagged
+    _got2, ref2 = _repro_case(ref_capture=0.50)
+    bad = check_v3a41_reproduction(got, ref2)
+    assert not bad['ok'] and bad['mismatches'] == ['capture_legacy'], bad
+    # PSNR drift is flagged with its own name
+    _got3, ref3 = _repro_case(g1_psnr=20.6)
+    bad3 = check_v3a41_reproduction(got, ref3)
+    assert not bad3['ok'] and bad3['mismatches'] == ['psnr_G1'], bad3
+    # a legacy headroom of zero cannot define a capture; must not be silent
+    got4, ref4 = _repro_case()
+    got4['capture']['G1'] = dict(capture=0.5, capture_legacy=None)
+    _expect_fail(lambda: check_v3a41_reproduction(got4, ref4),
+                 'undefined capture_legacy')
+
+
 # ── §23 smoke ───────────────────────────────────────────────────────────────
 
 def test_smoke_script_reaches_aggregation():
@@ -482,6 +534,24 @@ def test_smoke_script_reaches_aggregation():
                         'Spatial_H4_legacy'}, arms
         for row in curve:
             assert 'capture_vs_BlockH4' in row and 'capture_vs_LegacyH4' in row
+            if row['arm'] == 'Spatial_H4_legacy':
+                # the legacy anchor is not a step of the resolution curve
+                assert row['marginal_gain_vs_prev'] == '', row
+                assert row['is_resolution_step'] == 'False', row
+            else:
+                assert row['marginal_gain_vs_prev'] != '', row
+                assert row['is_resolution_step'] == 'True', row
+        # the resolution curve stops at Block_H4
+        summ = json.load(open(os.path.join(tmp, 'oracle', 'summary.json'),
+                              encoding='utf-8'))
+        for state, e in summ['splits']['dev'].items():
+            # json.dump(sort_keys=True) reorders object keys, so compare sets
+            keys = set(e['marginal_gain'])
+            assert keys == {'R1->G1', 'G1->G2', 'G2->G4', 'G4->G8',
+                            'G8->G16', 'G16->Block_H4'}, (state, keys)
+            lm = e['legacy_marginal']
+            assert set(lm) == {'Spatial_H4_legacy_vs_R1',
+                               'Spatial_H4_legacy_vs_Block_H4'}, lm
         # every gate must be >= R1 on the same aggregation. The guarantee is on
         # continuous MSE; the reported PSNR is computed on 8-bit rounded images,
         # so allow a hair of rounding wiggle rather than a bit-exact bound.

@@ -222,6 +222,52 @@ def git_state(repo_dir=None):
     return head, dirty
 
 
+def check_v3a41_reproduction(got_state, ref_state, tol_capture=1e-3,
+                             tol_psnr=2e-3):
+    """Compare one (split, state) slice against the V3-A.4.1 baseline.
+
+    WHICH CAPTURE: V3-A.4.1 defined ``capture_global = H_global / H_spatial``
+    where its spatial oracle is the LEGACY area-downsample + bilinear one.
+    V3-A.4.2's primary ``capture`` uses the same-family Block_H4 denominator
+    instead, so the two numbers are different by construction. The historical
+    comparison must therefore use ``capture_legacy`` -- comparing ``capture``
+    would hard-fail a correct sweep. ``denominator`` is recorded in the row so
+    the artifact says which number was actually used.
+
+    ``got_state`` is one entry of our ``summary['splits'][split]``;
+    ``ref_state`` is one entry of the V3-A.4.1 ``global_vs_spatial.json``.
+    """
+    got_legacy = got_state['capture']['G1'].get('capture_legacy')
+    if got_legacy is None:
+        raise SystemExit('reproduction needs H_LegacyH4 > 0 to define '
+                         'capture_legacy; got None')
+    d_psnr = abs(got_state['mean_psnr']['G1'] - ref_state['Global_AO'])
+    d_spat = abs(got_state['mean_psnr']['Spatial_H4_legacy']
+                 - ref_state['Spatial_AO'])
+    d_cap = abs(got_legacy - ref_state['capture_global'])
+    mism = []
+    if d_psnr > tol_psnr:
+        mism.append('psnr_G1')
+    if d_spat > tol_psnr:
+        mism.append('psnr_Spatial_H4_legacy')
+    if d_cap > tol_capture:
+        mism.append('capture_legacy')
+    return dict(
+        denominator='capture_legacy',
+        psnr_G1=got_state['mean_psnr']['G1'],
+        psnr_G1_v3a41=ref_state['Global_AO'], d_psnr=d_psnr,
+        psnr_Spatial_H4_legacy=got_state['mean_psnr']['Spatial_H4_legacy'],
+        psnr_Spatial_H4_v3a41=ref_state['Spatial_AO'], d_psnr_spatial=d_spat,
+        capture_G1_legacy=got_legacy,
+        capture_v3a41=ref_state['capture_global'], d_capture=d_cap,
+        # informational only -- NOT what the historical capture is compared to
+        capture_G1_primary=got_state['capture']['G1'].get('capture'),
+        H_S_block_h4=got_state.get('H_S_block_h4'),
+        H_S_legacy_h4=got_state.get('H_S_legacy_h4'),
+        tol_capture=tol_capture, tol_psnr=tol_psnr,
+        ok=not mism, mismatches=mism)
+
+
 def _sha256(path):
     import hashlib
     h = hashlib.sha256()
