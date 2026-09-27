@@ -27,7 +27,8 @@ from local_refine_runtime import metrics                          # noqa: E402
 from model.V3A4Verifier import V3A4Refiner                        # noqa: E402
 from option import parser as option_parser                        # noqa: E402
 from v3a41_runtime import (aggregate_qopt_stats, compare_actions,  # noqa: E402
-                           crop_tensor, qopt_components, read_crop_manifest)
+                           crop_tensor, qopt_components, read_crop_manifest,
+                           verify_v3a41_artifact_lock)
 from v3a4_runtime import load_r1_proposal_strict                  # noqa: E402
 from v3a_runtime import exposure_gain                             # noqa: E402
 
@@ -52,6 +53,7 @@ def main():
     for sub in ('qopt_audit', 'action_consistency'):
         os.makedirs(os.path.join(a.root, sub), exist_ok=True)
 
+    verify_v3a41_artifact_lock(a.root, a.src_root, v4_root=a.v4_root)
     eps_e = json.load(open(os.path.join(a.v4_root, 'action_stats',
                                         'energy.json')))['eps_energy']
     crops = read_crop_manifest(os.path.join(a.root, 'crops', 'crop_manifest.csv'))
@@ -159,11 +161,14 @@ def main():
                                   target='full' if mode == 'FF' else 'crop',
                                   gap_gt=c - 0.5 * (d + m),
                                   q_correct=c, q_dark=d, q_mismatch=m))
-    for row in gap_table:
-        key = '%s_%s' % (row['split'], row['mode'].lower())
-        json.dump(summary['%s|%s|correct' % (row['split'], row['mode'])],
-                  open(os.path.join(a.root, 'qopt_audit', key + '.json'), 'w',
-                       encoding='utf-8'), indent=2, sort_keys=True)
+    # all three states per (split, mode) -- keeping only `correct` made it
+    # impossible to tell later whether N, Z or clipping drove a change
+    for tag in ('train', 'dev'):
+        for mode in ('FF', 'FC', 'CC'):
+            blob = {s: summary['%s|%s|%s' % (tag, mode, s)] for s in STATES}
+            json.dump(blob, open(os.path.join(
+                a.root, 'qopt_audit', '%s_%s.json' % (tag, mode.lower())), 'w',
+                encoding='utf-8'), indent=2, sort_keys=True)
 
     # ---- §9 per-image consistency
     per = {}

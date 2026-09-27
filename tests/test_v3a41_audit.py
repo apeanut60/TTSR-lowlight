@@ -13,7 +13,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from v3a2_runtime import action_optimal_gate                     # noqa: E402
 from v3a41_runtime import (build_fixed_crop_manifest, compare_actions,  # noqa: E402
                            crop_tensor, global_action_optimal_gate,
-                           qopt_components)
+                           qopt_components, stable_seed)
 
 
 def _rand(seed=0, h=64, w=96, b=1):
@@ -96,6 +96,72 @@ def test_crop_manifest_is_deterministic_and_in_bounds():
     per = [tuple((x['top'], x['left']) for x in a if x['sample_id'] == name)
            for name, _low, _high in rows]
     assert len(set(per)) > 1, 'every sample got the same crops'
+
+
+def test_stable_seed_is_constant_and_hash_independent():
+    """The old manifest used builtin hash(), which is salted per process."""
+    # fixed expected values: this must not change when the manifest is frozen
+    assert stable_seed(20260927, 'low00001.png') == 15193271
+    assert stable_seed(20260927, 'low00002.png') == 4152142966
+    # different inputs -> different seeds; order matters
+    assert stable_seed(1, 'a') != stable_seed(1, 'b')
+    assert stable_seed('a', 1) != stable_seed(1, 'a')
+
+
+def test_stable_seed_is_process_independent():
+    """Two subprocesses with different PYTHONHASHSEED must agree."""
+    import subprocess
+    code = ("import sys; sys.path.insert(0, %r); "
+            "from v3a41_runtime import stable_seed; "
+            "print(stable_seed(20260927, 'low00001.png'))" % os.path.dirname(
+                os.path.dirname(os.path.abspath(__file__))))
+    outs = []
+    for hs in ('0', '12345'):
+        env = dict(os.environ, PYTHONHASHSEED=hs)
+        outs.append(subprocess.check_output([sys.executable, '-c', code],
+                                            env=env).decode().strip())
+    assert outs[0] == outs[1] == '15193271', outs
+
+
+def test_global_oracle_script_reaches_aggregation():
+    """End-to-end smoke: the accumulator/aggregation path must not KeyError.
+
+    This is the check that would have caught the `acc['R1|state']` bug, which
+    only fired after the whole loop had run.
+    """
+    import subprocess
+    import shutil
+    import tempfile
+    src = '/root/data/experiments/v3a41_target_audit'
+    if not os.path.isfile(os.path.join(src, 'crops', 'crop_manifest.csv')):
+        return 'SKIP: audit setup has not been run'
+    # run in a throwaway root so the test cannot overwrite the real
+    # oracle/global_vs_spatial.json with a 2-image debug result
+    tmp = tempfile.mkdtemp(prefix='v3a41_smoke_')
+    try:
+        os.makedirs(os.path.join(tmp, 'crops'), exist_ok=True)
+        shutil.copy(os.path.join(src, 'crops', 'crop_manifest.csv'),
+                    os.path.join(tmp, 'crops', 'crop_manifest.csv'))
+        shutil.copy(os.path.join(src, 'artifact_lock.json'),
+                    os.path.join(tmp, 'artifact_lock.json'))
+        out = subprocess.check_output(
+            [sys.executable, '-W', 'ignore',
+             os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                          'scripts', 'diagnose_v3a41_global_oracle.py'),
+             '--root', tmp, '--splits', 'dev', '--limit', '2'],
+            stderr=subprocess.STDOUT).decode()
+        assert 'D2: Gate Resolution Necessity' in out, out[-2000:]
+        assert 'KeyError' not in out
+        import json as _json
+        p = os.path.join(tmp, 'oracle', 'global_vs_spatial.json')
+        assert os.path.isfile(p), 'oracle summary not written'
+        s = _json.load(open(p, encoding='utf-8'))
+        assert 'dev' in s and 'correct' in s['dev']
+        for k in ('R1', 'Global_AO', 'Spatial_AO', 'H_global', 'H_spatial',
+                  'capture_global'):
+            assert k in s['dev']['correct'], k
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
 
 
 def test_compare_actions_metrics():

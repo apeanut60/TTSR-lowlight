@@ -10,6 +10,7 @@ parameters changed, no checkpoint written.
 """
 
 import csv
+import hashlib
 import json
 import os
 
@@ -79,12 +80,17 @@ def aggregate_qopt_stats(comp, eps_energy):
 # ── §4 deterministic crop manifest ──────────────────────────────────────────
 
 def build_fixed_crop_manifest(rows, split, crop=128, k=16, seed=20260927):
-    """Deterministic (sample, crop_id) -> (top, left). Written once, then read."""
+    """Deterministic (sample, crop_id) -> (top, left). Written once, then read.
+
+    The seed must not come from Python's builtin ``hash()``: string hashing is
+    salted per process (PYTHONHASHSEED), so the "fixed" manifest would differ
+    between runs and machines.
+    """
     out = []
     for name, low, _high in rows:
         from PIL import Image
         w, h = Image.open(low).size          # only the size is needed here
-        rng = np.random.default_rng(abs(hash((seed, name))) % (2 ** 32))
+        rng = np.random.default_rng(stable_seed(seed, name))
         for cid in range(k):
             top = int(rng.integers(0, h - crop + 1)) if h > crop else 0
             left = int(rng.integers(0, w - crop + 1)) if w > crop else 0
@@ -92,6 +98,48 @@ def build_fixed_crop_manifest(rows, split, crop=128, k=16, seed=20260927):
                             top=top, left=left, height=crop, width=crop,
                             seed=seed))
     return out
+
+
+def stable_seed(*parts):
+    """Process/machine-independent 32-bit seed from any tuple of values."""
+    s = '|'.join(str(p) for p in parts).encode('utf-8')
+    return int.from_bytes(hashlib.sha256(s).digest()[:8], 'little') % (2 ** 32)
+
+
+def verify_v3a41_artifact_lock(root, src_root,
+                               ckpt_name='R1_v2stable_naive_s42/checkpoint_03000.pt',
+                               cache_name='cache_y0_lolbase', v4_root=None):
+    """Re-check every SHA in the V3-A.4.1 lock before a diagnostic runs."""
+    lock_path = os.path.join(root, 'artifact_lock.json')
+    if not os.path.isfile(lock_path):
+        raise SystemExit('audit artifact lock missing: %s' % lock_path)
+    lock = json.load(open(lock_path, encoding='utf-8'))
+    v4 = v4_root or '/root/data/experiments/v3a4_lolv2real'
+    paths = {
+        'proposal_sha256': os.path.join(src_root, ckpt_name),
+        'cache_metadata_sha256': os.path.join(src_root, cache_name,
+                                              'refiner_train', 'metadata.json'),
+        'manifest_sha256': os.path.join(src_root, 'manifests', 'refiner_train.csv'),
+        'split_sha256': os.path.join(v4, 'splits', 'split.json'),
+        'mismatch_train_sha256': os.path.join(v4, 'mappings',
+                                              'mismatch_train_575.json'),
+        'mismatch_dev_sha256': os.path.join(v4, 'mappings',
+                                            'mismatch_dev_64.json'),
+        'energy_stats_sha256': os.path.join(v4, 'action_stats', 'energy.json'),
+        'crop_manifest_sha256': os.path.join(root, 'crops', 'crop_manifest.csv'),
+    }
+    bad = []
+    for key, p in paths.items():
+        if key not in lock:
+            raise SystemExit('audit lock missing %s' % key)
+        if not os.path.isfile(p):
+            raise SystemExit('locked artifact not found: %s' % p)
+        if hashlib.sha256(open(p, 'rb').read()).hexdigest() != lock[key]:
+            bad.append(key)
+    if bad:
+        raise SystemExit('audit lock mismatch on %s -- rerun '
+                         'scripts/setup_v3a41_audit.py' % ', '.join(bad))
+    return lock
 
 
 def read_crop_manifest(path):

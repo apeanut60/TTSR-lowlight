@@ -30,7 +30,8 @@ from dataset.lolv2real_v3a import TrainSet, pairs_from_manifest, read_model_imag
 from local_refine_runtime import metrics                          # noqa: E402
 from model.V3A4Verifier import V3A4Refiner                        # noqa: E402
 from option import parser as option_parser                        # noqa: E402
-from v3a41_runtime import global_action_optimal_gate, qopt_components  # noqa: E402
+from v3a41_runtime import (global_action_optimal_gate, qopt_components,  # noqa: E402
+                           verify_v3a41_artifact_lock)
 from v3a4_runtime import load_r1_proposal_strict                  # noqa: E402
 from v3a_runtime import exposure_gain                             # noqa: E402
 
@@ -49,13 +50,14 @@ def main():
     ap.add_argument('--variant', default='nanobanana_ref_v2')
     ap.add_argument('--cache_name', default='cache_y0_lolbase')
     ap.add_argument('--splits', default='dev,train')
-    ap.add_argument('--coarse', default='1,2,4',
-                    help='extra coarse gate resolutions (g x g blocks) for §12 B3')
+    ap.add_argument('--limit', type=int, default=0,
+                    help='debug: only the first N images per split')
     ap.add_argument('--device', default='cuda')
     a = ap.parse_args(_CLI)
     dev = a.device
     os.makedirs(os.path.join(a.root, 'oracle'), exist_ok=True)
 
+    verify_v3a41_artifact_lock(a.root, a.src_root, v4_root=a.v4_root)
     ns = option_parser.parse_args([])
     ns.dataset_dir = a.data_dir
     ns.v3a_ref_variant = a.variant
@@ -68,8 +70,6 @@ def main():
                            encoding='utf-8'))
     all_pairs = {p[0]: p for p in pairs_from_manifest(
         os.path.join(a.src_root, 'manifests', 'refiner_train.csv'))}
-    coarse = [int(x) for x in a.coarse.split(',') if x.strip()]
-
     out, per_image = {}, []
     for tag in [s.strip() for s in a.splits.split(',') if s.strip()]:
         rows = [all_pairs[i] for i in split['train' if tag == 'train' else 'dev']]
@@ -80,12 +80,15 @@ def main():
             a.v4_root, 'mappings',
             'mismatch_%s.json' % ('train_575' if tag == 'train' else 'dev_64')),
             encoding='utf-8'))
-        acc = {c: [] for c in ('Base', 'R1')}
+        # R1 is state-dependent: one accumulator per (arm, state), not a single
+        # shared 'R1' key (that mismatch caused a KeyError at aggregation).
+        acc = {'Base': []}
         for s in STATES:
-            for c in ('Global-AO', 'Spatial-AO'):
-                acc['%s|%s' % (c, s)] = []
-            for g in coarse:
-                acc['Coarse%d-AO|%s' % (g, s)] = []
+            acc['R1|%s' % s] = []
+            acc['Global-AO|%s' % s] = []
+            acc['Spatial-AO|%s' % s] = []
+        if a.limit:
+            rows = rows[:a.limit]
         for i, (name, low, high) in enumerate(rows):
             _n, lr, hr, ref, y0, _m = ds._load(i)
             donor = ds.ref_map[mmap[name]]
@@ -109,21 +112,17 @@ def main():
                     qf = F.interpolate(c['q_opt'], size=y0d.shape[-2:],
                                        mode='bilinear', align_corners=False)
                     rec['Spatial-AO|%s' % s] = metrics(y0d + qf * D, hrd)[0]
-                    # coarse block gates
-                    h, w = y0d.shape[-2:]
-                    for g in coarse:
-                        qq = F.adaptive_avg_pool2d(c['q_opt'], (g, g))
-                        qq = F.interpolate(qq, size=(h, w), mode='bilinear',
-                                           align_corners=False)
-                        rec['Coarse%d-AO|%s' % (g, s)] = metrics(y0d + qq * D,
-                                                                 hrd)[0]
+                    # NOTE: no blockwise "coarse oracle" here. Averaging the
+                    # H/4 oracle map is a *smoothed spatial gate*, not a gate
+                    # re-optimised under a g x g parameterisation. Per the plan
+                    # §12, the coarse sweep only runs if the global capture
+                    # lands in the 0.4-0.7 band, and then it must be a real
+                    # blockwise optimum.
                 acc['Base'].append(rec['Base'])
             for s in STATES:
-                acc['R1'].append(rec['R1|%s' % s])
+                acc['R1|%s' % s].append(rec['R1|%s' % s])
                 for c in ('Global-AO', 'Spatial-AO'):
                     acc['%s|%s' % (c, s)].append(rec['%s|%s' % (c, s)])
-                for g in coarse:
-                    acc['Coarse%d-AO|%s' % (g, s)].append(rec['Coarse%d-AO|%s' % (g, s)])
             per_image.append(rec)
             if (i + 1) % 100 == 0:
                 print('  %s %d/%d' % (tag, i + 1, len(rows)))
@@ -137,11 +136,10 @@ def main():
             hg, hs = glob - r1, spat - r1
             entry = dict(base=base, R1=r1, Global_AO=glob, Spatial_AO=spat,
                          H_global=hg, H_spatial=hs,
-                         capture_global=(hg / hs) if abs(hs) > 1e-9 else None)
-            for g in coarse:
-                v = float(np.mean(acc['Coarse%d-AO|%s' % (g, s)]))
-                entry['Coarse%d_AO' % g] = v
-                entry['capture_coarse%d' % g] = (v - r1) / hs if abs(hs) > 1e-9 else None
+                         # capture is only defined when the spatial oracle has
+                         # POSITIVE headroom; a negative denominator would give
+                         # a ratio with no meaning
+                         capture_global=(hg / hs) if hs > 0 else None)
             # per-image stats vs R1
             d = np.array(acc['Global-AO|%s' % s]) - np.array(acc['R1|%s' % s])
             ds_ = np.array(acc['Spatial-AO|%s' % s]) - np.array(acc['R1|%s' % s])
@@ -161,7 +159,8 @@ def main():
     # §15: dev64 correct Spatial-AO must reproduce the V3-A.4 headroom
     ref_h = None
     p = os.path.join(a.v4_root, 'dev_eval', 'summary_dev.json')
-    if os.path.isfile(p):
+    # only meaningful on the FULL dev64 run; a --limit run is a debug smoke
+    if os.path.isfile(p) and not a.limit and 'dev' in out:
         ref_h = json.load(open(p))['headroom']['correct']
         got = out['dev']['correct']['H_spatial']
         if abs(got - ref_h) > 0.01:
