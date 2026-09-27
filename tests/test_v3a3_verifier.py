@@ -69,11 +69,19 @@ def test_verifier_receives_exactly_D4_and_E4():
 
 
 def test_gate_endpoints():
-    if not os.path.isfile(R1_CK):
-        return 'skip: R1 checkpoint missing'
+    """FIXED (V3-A.4 §2.4).
+
+    The original version loaded ``ck['model']`` -- a dict whose keys are
+    prefixed with ``proposal.``/``verifier.`` -- into ``m.proposal`` with
+    ``strict=False``. Every key missed, the proposal kept its zero-init, and
+    the test then passed *trivially* because q=0 and q=1 both return Y0.
+    It now loads strictly and asserts the proposal is non-degenerate.
+    """
     m = V3A3Refiner(use_action=True).eval()
-    m.proposal.load_state_dict(torch.load(R1_CK, map_location='cpu')['model'],
-                               strict=False)
+    with torch.no_grad():                     # no external checkpoint needed
+        m.proposal.c_out.weight.normal_(0, 0.3)
+        m.proposal.c_out.bias.normal_(0, 0.05)
+    assert float(m.proposal.c_out.weight.abs().max()) > 0.0
     y0, low, ref = _inp(3, h=64, w=96, b=1)
     with torch.no_grad():
         o0, _ = m(y0, ref, low=low, force_qv=0.0)
@@ -81,6 +89,17 @@ def test_gate_endpoints():
         sr, _aux = m.proposal(y0, ref)
     assert torch.equal(o0, y0), 'q=0 must return Base exactly'
     assert torch.equal(o1, sr), 'q=1 must return the frozen R1 output exactly'
+    assert not torch.equal(o1, y0), 'proposal output == Y0: endpoint check is vacuous'
+
+
+def test_real_r1_checkpoint_loads_strictly():
+    """Integration test. Missing checkpoint is reported, not counted as a pass."""
+    if not os.path.isfile(R1_CK):
+        return 'SKIP: R1 checkpoint missing'
+    from v3a4_runtime import load_r1_proposal_strict
+    m = V3A3Refiner(use_action=True)
+    load_r1_proposal_strict(m, R1_CK)
+    assert float(m.proposal.c_out.weight.abs().max()) > 0.0
 
 
 def test_shared_init_common_weights_and_zero_action_channels():
