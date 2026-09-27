@@ -26,7 +26,8 @@ from model.V3A4Verifier import V3A4Refiner                        # noqa: E402
 from option import parser as option_parser                        # noqa: E402
 from v3a2_runtime import action_optimal_gate                      # noqa: E402
 from v3a4_runtime import (load_r1_proposal_strict, masked_mae,    # noqa: E402
-                          masked_rmse, masked_smooth_l1, pixel_corr)
+                          masked_rmse, masked_smooth_l1, pixel_corr,
+                          verify_v3a4_artifact_lock)
 from v3a_runtime import exposure_gain                             # noqa: E402
 
 R1_CK = 'R1_v2stable_naive_s42/checkpoint_03000.pt'
@@ -46,6 +47,7 @@ def main():
     a = ap.parse_args(_CLI)
     dev = a.device
 
+    verify_v3a4_artifact_lock(a.root, a.src_root)
     split = json.load(open(os.path.join(a.root, 'splits', 'split.json'),
                            encoding='utf-8'))
     dset = set(split['dev'])
@@ -75,14 +77,18 @@ def main():
             p.requires_grad_(False)
         return m
 
+    # P0-2: NO silent fallback. A missing checkpoint must stop the run --
+    # otherwise the evaluator quietly reports a freshly-initialised arm as if it
+    # had been trained.
     arms = {}
     for mode, tag in TAGS.items():
         p = os.path.join(a.root, tag, 'checkpoint_%05d.pt' % a.step)
-        if os.path.isfile(p):
-            arms[mode] = build(mode, p)
-    if 'none' not in arms:
-        arms['none'] = build('none')
-    r1 = build('none')
+        if not os.path.isfile(p):
+            raise SystemExit('required checkpoint missing: %s (all three of '
+                             'C0/C1/C2 must exist; refusing to fall back to an '
+                             'untrained arm)' % p)
+        arms[mode] = build(mode, p)
+    r1 = build('none')          # R1 only needs the frozen proposal
 
     states = ['correct', 'true_dark_g0.5', 'mismatch']
     acc = {}
@@ -113,28 +119,28 @@ def main():
                 acc.setdefault('AO', {}).setdefault(s, []).append(
                     metrics(y0d + qf * D, hrd)[0])
                 mask = (e > eps_e).float()
+                # P0-1: C0 gets the same gate metrics as C1/C2 -- the primary
+                # criterion is corr(C2) >= corr(C0) + 0.10, which is undefined
+                # if C0's q_v is never compared with q_opt.
                 for mode, m in arms.items():
                     o, aux = m(y0d, rd, low=lowd)
                     acc.setdefault(mode, {}).setdefault(s, []).append(
                         metrics(o, hrd)[0])
-                    if mode != 'none':
-                        g = gate.setdefault(mode, {}).setdefault(s, dict(
-                            q=[[], []], corr=[], mae=[], rmse=[], sl1=[],
-                            qopt=[[], []]))
-                        g['corr'].append(pixel_corr(aux['q_v4'], q_opt, mask))
-                        g['mae'].append(masked_mae(aux['q_v4'], q_opt, mask))
-                        g['rmse'].append(masked_rmse(aux['q_v4'], q_opt, mask))
-                        g['sl1'].append(float(masked_smooth_l1(aux['q_v4'], q_opt, mask)))
-                        g['q'][0].append(float(aux['q_v4'].mean()))
-                        g['q'][1].append(float(aux['q_v4'].mean()))
-                        g['qopt'][0].append(float(q_opt.mean()))
-                        g['qopt'][1].append(float(q_opt.mean()))
-                        # per-image spatial correlation
-                        cc = []
-                        for b in range(q_opt.shape[0]):
-                            cc.append(pixel_corr(aux['q_v4'][b:b+1], q_opt[b:b+1],
-                                                 mask[b:b+1]))
-                        g.setdefault('spatial_corr', []).extend(cc)
+                    g = gate.setdefault(mode, {}).setdefault(s, dict(
+                        qv=[], qopt=[], sl1=[], mae_img=[], rmse_img=[],
+                        spatial_corr=[], pix_qv=[], pix_qopt=[]))
+                    g['qv'].append(float(aux['q_v4'].mean()))
+                    g['qopt'].append(float(q_opt.mean()))
+                    g['sl1'].append(float(masked_smooth_l1(aux['q_v4'], q_opt, mask)))
+                    g['mae_img'].append(masked_mae(aux['q_v4'], q_opt, mask))
+                    g['rmse_img'].append(masked_rmse(aux['q_v4'], q_opt, mask))
+                    g['spatial_corr'].append(
+                        pixel_corr(aux['q_v4'], q_opt, mask))
+                    # accumulate the actual valid pixels so the primary metric
+                    # can be a true global correlation over dev64
+                    sel = mask > 0
+                    g['pix_qv'].append(aux['q_v4'][sel].detach().float().cpu())
+                    g['pix_qopt'].append(q_opt[sel].detach().float().cpu())
                     rec['%s_%s' % (mode, s)] = metrics(o, hrd)[0]
                 o, _ = r1(y0d, rd, low=lowd, force_qv=0.0)
                 rec['R1bypass_%s' % s] = metrics(o, hrd)[0]
@@ -177,28 +183,54 @@ def main():
           % (out['correct']['C0'] - r1c,
              (out['correct']['C1_raw'] or float('nan')) - r1c,
              (out['correct']['C2_norm'] or float('nan')) - r1c))
+    def agg(g):
+        qv = torch.cat(g['pix_qv'])
+        qo = torch.cat(g['pix_qopt'])
+        n = int(qv.numel())
+        corr = float(torch.corrcoef(torch.stack([qv, qo]))[0, 1]) if n > 1 else float('nan')
+        sc = np.asarray(g['spatial_corr'], dtype=float)
+        return dict(
+            n_pixels=n,
+            corr_global=corr,
+            mae_global=float((qv - qo).abs().mean()),
+            rmse_global=float(((qv - qo) ** 2).mean().sqrt()),
+            sl1=float(np.mean(g['sl1'])),
+            mae_image_mean=float(np.mean(g['mae_img'])),
+            rmse_image_mean=float(np.mean(g['rmse_img'])),
+            q_v_mean=float(np.mean(g['qv'])), q_opt_mean=float(np.mean(g['qopt'])),
+            spatial_corr_mean=float(np.nanmean(sc)),
+            spatial_corr_median=float(np.nanmedian(sc)),
+            spatial_corr_p25=float(np.nanpercentile(sc, 25)),
+            spatial_corr_p75=float(np.nanpercentile(sc, 75)))
+
     if gate:
+        out['gate'] = {mode: {s: agg(gate[mode][s]) for s in states}
+                       for mode in gate}
         print()
-        print('  %-8s %-22s %8s %8s %8s %8s' % ('arm', 'state', 'corr', 'MAE', 'RMSE', 'SmoothL1'))
-        for mode in ('raw', 'norm'):
+        print('  %-8s %-22s %10s %10s %10s | %8s %8s'
+              % ('arm', 'state', 'corr_glob', 'MAE_glob', 'RMSE_glob',
+                 'MAE_img', 'sp_corr'))
+        for mode in ('none', 'raw', 'norm'):
             for s in states:
                 if mode not in gate:
                     continue
-                g = gate[mode][s]
-                print('  %-8s %-22s %8.3f %8.3f %8.3f %8.3f'
-                      % (mode, s, float(np.nanmean(g['corr'])),
-                         float(np.mean(g['mae'])), float(np.mean(g['rmse'])),
-                         float(np.mean(g['sl1']))))
-        out['gate'] = {mode: {s: dict(
-            corr=float(np.nanmean(gate[mode][s]['corr'])),
-            mae=float(np.mean(gate[mode][s]['mae'])),
-            rmse=float(np.mean(gate[mode][s]['rmse'])),
-            sl1=float(np.mean(gate[mode][s]['sl1'])),
-            spatial_corr_mean=float(np.nanmean(gate[mode][s].get('spatial_corr', [np.nan]))),
-            spatial_corr_median=float(np.nanmedian(gate[mode][s].get('spatial_corr', [np.nan]))),
-            spatial_corr_p25=float(np.nanpercentile(gate[mode][s].get('spatial_corr', [np.nan]), 25)),
-            spatial_corr_p75=float(np.nanpercentile(gate[mode][s].get('spatial_corr', [np.nan]), 75)),
-        ) for s in states} for mode in gate}
+                v = out['gate'][mode][s]
+                print('  %-8s %-22s %10.3f %10.3f %10.3f | %8.3f %8.3f'
+                      % (mode, s, v['corr_global'], v['mae_global'],
+                         v['rmse_global'], v['mae_image_mean'],
+                         v['spatial_corr_mean']))
+        print()
+        print('  §16 primary: corr_global(C2) - corr_global(C0) = %+.4f  (need >= +0.10)'
+              % (out['gate']['norm']['correct']['corr_global']
+                 - out['gate']['none']['correct']['corr_global']))
+        print('  §16 primary: MAE_global(C2) < MAE_global(C0)      = %s (%.4f vs %.4f)'
+              % (out['gate']['norm']['correct']['mae_global']
+                 < out['gate']['none']['correct']['mae_global'],
+                 out['gate']['norm']['correct']['mae_global'],
+                 out['gate']['none']['correct']['mae_global']))
+        print('  §16 primary: corr_global(C2) - corr_global(C1) = %+.4f  (need >= +0.08)'
+              % (out['gate']['norm']['correct']['corr_global']
+                 - out['gate']['raw']['correct']['corr_global']))
 
     os.makedirs(os.path.join(a.root, 'dev_eval'), exist_ok=True)
     jp = os.path.join(a.root, 'dev_eval', 'summary_dev.json')

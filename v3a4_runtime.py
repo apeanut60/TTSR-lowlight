@@ -17,7 +17,9 @@ Fixes four defects found in the V3-A.3 code:
 4. ``masked_smooth_l1`` was reported under the name ``masked_mae``.
 """
 
+import hashlib
 import json
+import os
 
 import numpy as np
 import torch
@@ -54,6 +56,54 @@ def load_r1_proposal_strict(model, ckpt_path, device='cpu'):
             raise SystemExit('%s is all-zero in %s -- proposal is degenerate'
                              % (k, ckpt_path))
     return model
+
+
+def verify_v3a4_artifact_lock(root, src_root, ckpt_name='R1_v2stable_naive_s42/checkpoint_03000.pt',
+                              cache_name='cache_y0_lolbase'):
+    """Re-check EVERY SHA in artifact_lock.json at run time.
+
+    The acceptance script already does this once, but a training or evaluation
+    entry point that only checks the proposal and the cache will happily run on
+    a split / mismatch map / stats file that changed after acceptance.
+    """
+    lock_path = os.path.join(root, 'artifact_lock.json')
+    if not os.path.isfile(lock_path):
+        raise SystemExit('artifact lock missing: %s' % lock_path)
+    lock = json.load(open(lock_path, encoding='utf-8'))
+    paths = {
+        'proposal_sha256': os.path.join(src_root, ckpt_name),
+        'cache_metadata_sha256': os.path.join(src_root, cache_name,
+                                              'refiner_train', 'metadata.json'),
+        'manifest_sha256': os.path.join(src_root, 'manifests', 'refiner_train.csv'),
+        'split_sha256': os.path.join(root, 'splits', 'split.json'),
+        'mismatch_train_sha256': os.path.join(root, 'mappings',
+                                              'mismatch_train_575.json'),
+        'mismatch_dev_sha256': os.path.join(root, 'mappings',
+                                            'mismatch_dev_64.json'),
+        'energy_stats_sha256': os.path.join(root, 'action_stats', 'energy.json'),
+        'action_norm_sha256': os.path.join(root, 'action_stats', 'action_norm.json'),
+    }
+    drift = []
+    for key, p in paths.items():
+        if key not in lock:
+            raise SystemExit('artifact lock is missing %s' % key)
+        if not os.path.isfile(p):
+            raise SystemExit('locked artifact not found: %s' % p)
+        if _sha(p) != lock[key]:
+            drift.append(key)
+    if drift:
+        raise SystemExit('artifact lock mismatch on: %s -- rerun '
+                         'scripts/setup_v3a4_protocol.py' % ', '.join(drift))
+    return lock
+
+
+def _sha(path):
+    import hashlib
+    h = hashlib.sha256()
+    with open(path, 'rb') as f:
+        for b in iter(lambda: f.read(1 << 20), b''):
+            h.update(b)
+    return h.hexdigest()
 
 
 def freeze_proposal(model):

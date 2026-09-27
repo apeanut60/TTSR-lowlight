@@ -178,8 +178,13 @@ def main():
         ns = option_parser.parse_args([])
         ns.dataset_dir = '/root/data/datasets/lol-v2-real'
         ns.v3a_ref_variant = 'nanobanana_ref_v2'
-        pairs = pairs_from_manifest(os.path.join(SRC, 'manifests',
-                                                 'refiner_train.csv'))[:4]
+        # restrict to train575 (the first 4 of the 639 could be dev images;
+        # harmless here since this only sanity-checks the scale, but keeping it
+        # in-split avoids any ambiguity)
+        tr = set(split['train'])
+        pairs = sorted([p for p in pairs_from_manifest(
+            os.path.join(SRC, 'manifests', 'refiner_train.csv'))
+            if p[0] in tr], key=lambda p: p[0])[:4]
         ds = TrainSet(ns, crop_size=128, pairs=pairs,
                       y0_cache=os.path.join(SRC, 'cache_y0_lolbase',
                                             'refiner_train'), split='Train')

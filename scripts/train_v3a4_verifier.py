@@ -30,7 +30,7 @@ from option import parser as option_parser                         # noqa: E402
 from v3a2_runtime import action_optimal_gate, masked_smooth_l1     # noqa: E402
 from v3a4_runtime import (action_features_raw, freeze_proposal,    # noqa: E402
                           gap, load_r1_proposal_strict, masked_mae,
-                          masked_rmse, pixel_corr)
+                          masked_rmse, pixel_corr, verify_v3a4_artifact_lock)
 from v3a_runtime import exposure_gain                              # noqa: E402
 
 R1_CK = 'R1_v2stable_naive_s42/checkpoint_03000.pt'
@@ -78,7 +78,8 @@ def main():
     print('=== V3-A.4 %s (mode=%s) -> %s' % (a.arm, mode, run_dir))
     torch.manual_seed(a.seed)
 
-    lock = json.load(open(os.path.join(a.root, 'artifact_lock.json'), encoding='utf-8'))
+    # every locked SHA, not just the proposal and the cache
+    lock = verify_v3a4_artifact_lock(a.root, a.src_root)
     split = json.load(open(os.path.join(a.root, 'splits', 'split.json'),
                            encoding='utf-8'))
     if sha256(os.path.join(a.src_root, R1_CK)) != lock['proposal_sha256']:
@@ -230,9 +231,19 @@ def main():
                 row['head0_action_abs'] = float(za.abs().mean())
                 row['head0_action_ratio'] = float(
                     za.abs().mean() / (zc.abs().mean() + 1e-12))
-                gwc, gwa = last.weight.grad, None
                 row['common_weight_l2'] = float(wc.norm())
                 row['action_weight_l2'] = float(wa.norm())
+                # P1-2: the plan asked for gradient norms per channel group.
+                # Without them we cannot tell "normalization gave the action a
+                # real learning signal" from "the pre-activation just got
+                # bigger". Recorded here, before opt.step() clears the grads.
+                gw = last.weight.grad
+                if gw is not None:
+                    cg = float(gw[:, :160].norm())
+                    ag = float(gw[:, 160:].norm())
+                    row['common_grad_l2'] = cg
+                    row['action_grad_l2'] = ag
+                    row['action_grad_ratio'] = ag / (cg + 1e-12)
             opt.step()
             if step % a.log_every == 0 or step == 1:
                 log_f.write(json.dumps(row) + '\n')
