@@ -116,7 +116,9 @@ def main():
             qf = F.interpolate(q_star, size=y0d.shape[-2:], mode='bilinear',
                                align_corners=False)
             r['R2-GT-usefulness-gate'] = metrics(
-                y0d + qf * qs['correct']['delta'], hrd)
+                # NOTE: must include the V2 gate. The first version omitted it
+                # and produced the (deprecated) +0.5821 figure.
+                y0d + qs['correct']['gate_v2'] * qf * qs['correct']['delta'], hrd)
         res[sid] = r
         extra[sid] = dict(
             q_v_correct=float(qs['correct']['q_v'].mean()),
