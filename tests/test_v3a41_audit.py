@@ -142,7 +142,8 @@ def test_global_oracle_script_reaches_aggregation():
     import shutil
     import tempfile
     import json
-    src = '/root/data/experiments/v3a41_target_audit'
+    # the geometry-augmented manifest lives in the v2 audit root
+    src = '/root/data/experiments/v3a41_target_audit_v2'
     if not os.path.isfile(os.path.join(src, 'crops', 'crop_manifest.csv')):
         return 'SKIP: audit setup has not been run'
     # run in a throwaway root so the test cannot overwrite the real
@@ -230,6 +231,80 @@ def test_fcg_equals_fc_but_ccg_differs_from_cc():
         d = abs(float(c_fc['q_opt'].mean()) - float(c_fcg['q_opt'].mean()))
         assert d < 1e-5, ('FCG must equal FC (geometry is a common transform); '
                           'geom %s differs by %.2e' % (geom, d))
+
+
+def _directional_proposal(y0c, rc):
+    """Explicitly NOT rotation-equivariant: a left-to-right ramp is added in the
+    proposal's OWN frame, so rotating the input does not rotate the output."""
+    D = 0.5 * (rc - y0c)
+    h, w = y0c.shape[-2:]
+    ramp = torch.linspace(-0.2, 0.2, w).view(1, 1, 1, w).expand(1, 3, h, w)
+    return None, {'gate': torch.ones_like(y0c[:, :1]), 'delta': D + ramp}
+
+
+def test_ccg_actually_exercises_the_geometry_path():
+    """mode_cc/mode_ccg must be called with a non-equivariant proposal, so the
+    audit is provably sensitive to the rot/flip response."""
+    y0, hr, ref = _rand(10, h=64, w=64)
+    box = (8, 16, 32, (1, 0, 0))
+    c_cc, _a_cc, d_cc = mode_cc(y0, hr, ref, box, _directional_proposal)
+    c_ccg, _a_ccg, d_ccg = mode_ccg(y0, hr, ref, box, _directional_proposal)
+    # the CCG correction must NOT be the rotated CC correction
+    rot_cc = apply_geometry(d_cc, 1, 0, 0)
+    assert not torch.allclose(rot_cc, d_ccg, atol=1e-6), \
+        'directional proposal: CCG action equals a rotation of CC action'
+    assert abs(float(c_cc['q_opt'].mean()) - float(c_ccg['q_opt'].mean())) > 1e-6, \
+        'CC and CCG targets are indistinguishable under a non-equivariant proposal'
+    # with identity geometry they must coincide
+    box0 = (8, 16, 32, (0, 0, 0))
+    a = mode_ccg(y0, hr, ref, box0, _directional_proposal)
+    b = mode_cc(y0, hr, ref, box0, _directional_proposal)
+    assert torch.allclose(a[0]['q_opt'], b[0]['q_opt'], atol=1e-6)
+
+
+def test_qopt_target_script_reaches_aggregation():
+    """End-to-end smoke for Diagnostic A: the per-image aggregation reads all
+    five modes, and FCG/CCG used to be missing from the per-image record."""
+    import json
+    import shutil
+    import subprocess
+    import tempfile
+    src = '/root/data/experiments/v3a41_target_audit_v2'
+    if not os.path.isfile(os.path.join(src, 'crops', 'crop_manifest.csv')):
+        return 'SKIP: audit setup has not been run'
+    tmp = tempfile.mkdtemp(prefix='v3a41_a_smoke_')
+    try:
+        os.makedirs(os.path.join(tmp, 'crops'), exist_ok=True)
+        shutil.copy(os.path.join(src, 'crops', 'crop_manifest.csv'),
+                    os.path.join(tmp, 'crops', 'crop_manifest.csv'))
+        lock = json.load(open(os.path.join(src, 'artifact_lock.json'),
+                              encoding='utf-8'))
+        lock['repo_commit'] = subprocess.check_output(
+            ['git', 'rev-parse', 'HEAD'],
+            cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        ).decode().strip()
+        json.dump(lock, open(os.path.join(tmp, 'artifact_lock.json'), 'w',
+                             encoding='utf-8'), indent=2, sort_keys=True)
+        out = subprocess.check_output(
+            [sys.executable, '-W', 'ignore',
+             os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                          'scripts', 'diagnose_v3a41_qopt_target.py'),
+             '--root', tmp, '--splits', 'dev', '--limit', '2'],
+            stderr=subprocess.STDOUT).decode()
+        assert 'KeyError' not in out, out[-2000:]
+        s = json.load(open(os.path.join(tmp, 'qopt_audit', 'summary.json'),
+                           encoding='utf-8'))
+        modes = {r['mode'] for r in s['gap_table']}
+        assert modes == {'FF', 'FC', 'FCG', 'CC', 'CCG'}, modes
+        import csv as _csv
+        rows = list(_csv.DictReader(open(os.path.join(tmp, 'qopt_audit',
+                                                      'per_image.csv'),
+                                        encoding='utf-8')))
+        for st in ('correct', 'true_dark_g0.5', 'mismatch'):
+            for m in ('FF', 'FC', 'FCG', 'CC', 'CCG'):
+                assert '%s_%s' % (m, st) in rows[0], '%s_%s missing' % (m, st)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
 
 
 def test_modes_use_the_intended_d_full():

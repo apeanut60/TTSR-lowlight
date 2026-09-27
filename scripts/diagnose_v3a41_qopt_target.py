@@ -60,6 +60,7 @@ def main():
     verify_v3a41_artifact_lock(a.root, a.src_root, v4_root=a.v4_root)
     eps_e = json.load(open(os.path.join(a.v4_root, 'action_stats',
                                         'energy.json')))['eps_energy']
+    SPLITS = [s.strip() for s in a.splits.split(',') if s.strip()]
     crops = read_crop_manifest(os.path.join(a.root, 'crops', 'crop_manifest.csv'))
     by_split = {'train': {}, 'dev': {}}
     for r in crops:
@@ -83,7 +84,7 @@ def main():
     acc = {}          # (split, mode, state) -> list of per-pixel tensors
     per_image = []    # §9
     act_rows = []     # §8
-    for tag in [s.strip() for s in a.splits.split(',') if s.strip()]:
+    for tag in SPLITS:
         ids = split['train' if tag == 'train' else 'dev']
         rows = [all_pairs[i] for i in ids]
         if a.limit:
@@ -116,7 +117,7 @@ def main():
                             c[k].flatten().cpu())
                     img_rec['FF_%s' % s] = float(c['q_opt'].mean())
                     # ---- FC / FCG / CC / CCG per crop
-                    cc_q, cc_d = [], []
+                    crop_q = {m: [] for m in ('FC', 'FCG', 'CC', 'CCG')}
                     for cr in cl:
                         top, left = int(cr['top']), int(cr['left'])
                         sz = int(cr['height'])
@@ -135,8 +136,7 @@ def main():
                             for k in ('q_opt', 'q_raw', 'N', 'Z', 'energy'):
                                 acc.setdefault((tag, m_name, s), {}).setdefault(
                                     k, []).append(mc[k].flatten().cpu())
-                        cc_q.append(float(c_cc['q_opt'].mean()))
-                        cc_d.append(float(c_fc['q_opt'].mean()))
+                            crop_q[m_name].append(float(mc['q_opt'].mean()))
                         y0g = apply_geometry(y0c, *geom)
                         # §8: compare the crop-context proposal against the
                         # crop+geometry proposal. CCG sees what training sees.
@@ -162,8 +162,11 @@ def main():
                                       (apply_geometry(aux_cc['delta'], *geom)
                                        - aux_ccg['delta']).abs().mean()))
                         act_rows.append(m8)
-                    img_rec['FC_%s' % s] = float(np.mean(cc_d))
-                    img_rec['CC_%s' % s] = float(np.mean(cc_q))
+                    # every mode must be recorded: the per-image aggregation
+                    # below reads all five, and FCG/CCG were missing here
+                    for m_name in ('FC', 'FCG', 'CC', 'CCG'):
+                        img_rec['%s_%s' % (m_name, s)] = float(
+                            np.mean(crop_q[m_name]))
             per_image.append(img_rec)
             if (i + 1) % 100 == 0:
                 print('  %s %d/%d' % (tag, i + 1, len(rows)))
@@ -180,7 +183,7 @@ def main():
                  'FCG': ('full', 'crop', 'train-geometry(control)'),
                  'CC': ('crop', 'crop', 'none'),
                  'CCG': ('crop', 'crop', 'train-geometry')}
-    for tag in ('train', 'dev'):
+    for tag in SPLITS:
         for mode in MODES:
             c = summary['%s|%s|correct' % (tag, mode)]['q_opt']['mean']
             d = summary['%s|%s|true_dark_g0.5' % (tag, mode)]['q_opt']['mean']
@@ -192,7 +195,7 @@ def main():
                                   q_correct=c, q_dark=d, q_mismatch=m))
     # all three states per (split, mode) -- keeping only `correct` made it
     # impossible to tell later whether N, Z or clipping drove a change
-    for tag in ('train', 'dev'):
+    for tag in SPLITS:
         for mode in MODES:
             blob = {s: summary['%s|%s|%s' % (tag, mode, s)] for s in STATES}
             json.dump(blob, open(os.path.join(
@@ -201,7 +204,7 @@ def main():
 
     # ---- §9 per-image consistency
     per = {}
-    for tag in ('train', 'dev'):
+    for tag in SPLITS:
         recs = [r for r in per_image if r['split'] == tag]
         modes = {}
         for mode in MODES:
@@ -236,7 +239,7 @@ def main():
 
     act_summary = dict(n=len(act_rows), pooled=_agg(act_rows),
                        by_split_state={})
-    for tag in ('train', 'dev'):
+    for tag in SPLITS:
         for s in STATES:
             sub = [r for r in act_rows if r['split'] == tag and r['state'] == s]
             if sub:
@@ -272,7 +275,7 @@ def main():
                  r['q_mismatch']))
     print()
     print('  per-image gap:')
-    for tag in ('train', 'dev'):
+    for tag in SPLITS:
         p = per[tag]
         print('    %-6s ' % tag + '  '.join(
             '%s %+.3f(pos %.2f)' % (m, p['gap'][m]['mean'], p['gap'][m]['frac_pos'])

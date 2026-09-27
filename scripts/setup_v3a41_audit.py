@@ -41,20 +41,25 @@ def main():
                                                  'refiner_train.csv'))
     by_id = {p[0]: p for p in all_pairs}
     manifest_path = os.path.join(a.root, 'crops', 'crop_manifest.csv')
-    if os.path.isfile(manifest_path):
-        old = list(csv.DictReader(open(manifest_path, encoding='utf-8')))
-        if {(r['sample_id'], r['crop_id'], r['top'], r['left']) for r in old} != \
-           {(r['sample_id'], str(r['crop_id']), str(r['top']), str(r['left']))
-            for r in build_fixed_crop_manifest(
-                [by_id[i] for i in split['train']], 'train', a.crop, a.k,
-                a.seed) + build_fixed_crop_manifest(
-                [by_id[i] for i in split['dev']], 'dev', a.crop, a.k, a.seed)}:
-            raise SystemExit('crop manifest already exists and differs; refusing '
-                             'to resample')
     rows = (build_fixed_crop_manifest([by_id[i] for i in split['train']], 'train',
                                       a.crop, a.k, a.seed)
             + build_fixed_crop_manifest([by_id[i] for i in split['dev']], 'dev',
                                         a.crop, a.k, a.seed))
+    # Compare the FULL protocol key, geometry included: rot_k/flip_h/flip_w are
+    # scientific variables now, so a geometry change must refuse, not silently
+    # overwrite.
+    KEY = ('sample_id', 'split', 'crop_id', 'top', 'left', 'height', 'width',
+           'rot_k', 'flip_h', 'flip_w', 'seed')
+    if os.path.isfile(manifest_path):
+        old = list(csv.DictReader(open(manifest_path, encoding='utf-8')))
+        old_keys = {tuple(str(r.get(k, '<missing>')) for k in KEY) for r in old}
+        new_keys = {tuple(str(r[k]) for k in KEY) for r in rows}
+        if old_keys != new_keys:
+            raise SystemExit(
+                'crop manifest already exists and differs (%d rows vs %d, %d '
+                'keys differ) -- refusing to resample; use a new --root for a '
+                'new protocol' % (len(old), len(rows),
+                                  len(old_keys ^ new_keys)))
     with open(manifest_path, 'w', newline='', encoding='utf-8') as f:
         w = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
         w.writeheader()
