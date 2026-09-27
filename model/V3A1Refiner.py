@@ -33,14 +33,15 @@ from model.LocalRefine import Refiner as V2Proposal
 class LowAnchorVerifier(nn.Module):
     """Independent encoder (H/4) + small head -> q_v in [0,1]."""
 
-    def __init__(self, ch=(24, 32), hidden=32, mid=16):
+    def __init__(self, ch=(24, 32), hidden=32, mid=16, extra_ch=0):
         super().__init__()
         c0, c1 = ch
+        self.extra_ch = int(extra_ch)
         self.conv0 = nn.Conv2d(3, c0, 3, 2, 1, bias=True)
         self.conv1 = nn.Conv2d(c0, c1, 3, 2, 1, bias=True)
         self.act = nn.GELU()
-        # inputs: FX, F0, FR, |F0-FR|, |FX-FR|
-        self.head0 = nn.Conv2d(5 * c1, hidden, 1, 1, 0, bias=True)
+        # inputs: FX, F0, FR, |F0-FR|, |FX-FR| (+ optional action features)
+        self.head0 = nn.Conv2d(5 * c1 + self.extra_ch, hidden, 1, 1, 0, bias=True)
         self.head1 = nn.Conv2d(hidden, mid, 3, 1, 1, bias=True)
         self.head2 = nn.Conv2d(mid, 1, 1, 1, 0, bias=True)
         self.out_ch = c1
@@ -48,11 +49,19 @@ class LowAnchorVerifier(nn.Module):
     def encode(self, x):
         return self.act(self.conv1(self.act(self.conv0(x))))
 
-    def forward(self, x, y0, reference):
+    def forward(self, x, y0, reference, extra=None):
         fx = self.encode(x)
         f0 = self.encode(y0)
         fr = self.encode(reference)
         h = torch.cat([fx, f0, fr, (f0 - fr).abs(), (fx - fr).abs()], dim=1)
+        if self.extra_ch:
+            if extra is None:
+                raise ValueError('verifier expects %d extra action channels'
+                                 % self.extra_ch)
+            if extra.shape[1] != self.extra_ch:
+                raise ValueError('expected %d action channels, got %d'
+                                 % (self.extra_ch, extra.shape[1]))
+            h = torch.cat([h, extra], dim=1)
         h = self.act(self.head0(h))
         h = self.act(self.head1(h))
         return torch.sigmoid(self.head2(h))

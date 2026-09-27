@@ -80,6 +80,24 @@ def splice_corrupt(ref, donor, rng, min_frac=0.25, max_frac=0.5, n_blocks=2):
     return out
 
 
-def rescale_reference(ref, gain):
-    """Wrong-exposure bad reference: scale around mid-grey, then clip to [-1,1]."""
+def contrast_compress(ref, gain):
+    """Compress/expand around mid-grey in [-1,1].
+
+    NOTE: this is NOT an exposure change. Multiplying by 0.5 maps black -1 to
+    -0.5 (grey) and white +1 to +0.5 (grey), i.e. it halves contrast. An earlier
+    round used this as a "dark reference" and the resulting harm figure belongs
+    to contrast compression, not to under-exposure. Use ``exposure_gain`` for
+    the latter.
+    """
     return (ref * gain).clamp(-1.0, 1.0)
+
+
+def exposure_gain(ref, gain):
+    """True exposure scaling: operate in [0,1] so black stays black."""
+    ref01 = (ref + 1.0) * 0.5
+    out01 = (ref01 * gain).clamp(0.0, 1.0)
+    return out01 * 2.0 - 1.0
+
+
+# backwards-compatible alias: the old name described the wrong operation
+rescale_reference = contrast_compress

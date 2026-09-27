@@ -109,8 +109,11 @@ def main():
             qs, _ = usefulness_at(y0d, rd, hrd, tau)
             qsf = F.interpolate(qs, size=y0d.shape[-2:], mode='bilinear',
                                 align_corners=False)
+            # ``D`` already contains g_v2, so the old-style usefulness gate must
+            # NOT multiply by the proposal gate again (doing so scored g_v2^2
+            # and produced the deprecated +0.0592 figure).
             acc['R1-GT-usefulness-gate(fixed)'].append(
-                metrics(y0d + aux['gate'] * qsf * D, hrd)[0])
+                metrics(y0d + qsf * D, hrd)[0])
             qstats['q_opt'].append(float(q_opt.mean()))
             qstats['energy_above'].append(float((e > eps_energy).float().mean()))
             if (i + 1) % 25 == 0:
