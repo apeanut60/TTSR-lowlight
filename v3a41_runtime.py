@@ -13,6 +13,7 @@ import csv
 import hashlib
 import json
 import os
+import subprocess
 
 import numpy as np
 import torch
@@ -94,10 +95,40 @@ def build_fixed_crop_manifest(rows, split, crop=128, k=16, seed=20260927):
         for cid in range(k):
             top = int(rng.integers(0, h - crop + 1)) if h > crop else 0
             left = int(rng.integers(0, w - crop + 1)) if w > crop else 0
+            # drawn AFTER top/left, in the same order the dataset's _geometry
+            # draws them, so the audit's geometry is representative of training
+            rot_k = int(rng.integers(0, 4))
+            flip_h = int(rng.integers(0, 2))
+            flip_w = int(rng.integers(0, 2))
             out.append(dict(sample_id=name, split=split, crop_id=cid,
                             top=top, left=left, height=crop, width=crop,
-                            seed=seed))
+                            rot_k=rot_k, flip_h=flip_h, flip_w=flip_w, seed=seed))
     return out
+
+
+def apply_geometry(t, rot_k, flip_h, flip_w):
+    """Mirror ``dataset.lolv2real_v3a._geometry``'s post-crop order exactly:
+    rot90 -> flip(vertical) -> flip(horizontal), on the two SPATIAL axes.
+
+    ``_geometry`` operates on ``[C,H,W]`` tensors, so its ``dims=(1,2)`` are
+    (H,W). The audit works on ``[B,C,H,W]``, where the spatial axes are (2,3) --
+    using (1,2) there rotates channel-against-height, which is not a geometry
+    augmentation at all. That mistake was caught by the FC/FCG control.
+    """
+    if t.dim() == 4:
+        hd, wd = 2, 3
+    elif t.dim() == 3:
+        hd, wd = 1, 2
+    else:
+        raise ValueError('apply_geometry expects [B,C,H,W] or [C,H,W], got %s'
+                         % (tuple(t.shape),))
+    if int(rot_k):
+        t = torch.rot90(t, int(rot_k), dims=(hd, wd))
+    if int(flip_h):
+        t = torch.flip(t, dims=(hd,))
+    if int(flip_w):
+        t = torch.flip(t, dims=(wd,))
+    return t.contiguous()
 
 
 def stable_seed(*parts):
@@ -139,6 +170,19 @@ def verify_v3a41_artifact_lock(root, src_root,
     if bad:
         raise SystemExit('audit lock mismatch on %s -- rerun '
                          'scripts/setup_v3a41_audit.py' % ', '.join(bad))
+    # the lock also pins the code commit: the diagnostics are only valid for
+    # the revision they were generated with. Re-run setup after any code change.
+    try:
+        head = subprocess.check_output(
+            ['git', 'rev-parse', 'HEAD'],
+            cwd=os.path.dirname(os.path.abspath(__file__)),
+            stderr=subprocess.DEVNULL).decode().strip()
+    except Exception:                                            # noqa: BLE001
+        head = None
+    if head and lock.get('repo_commit') and lock['repo_commit'] != head:
+        raise SystemExit('audit lock was generated at commit %s but HEAD is %s '
+                         '-- rerun scripts/setup_v3a41_audit.py on the final '
+                         'revision' % (lock['repo_commit'][:8], head[:8]))
     return lock
 
 
@@ -149,6 +193,55 @@ def read_crop_manifest(path):
 def crop_tensor(t, top, left, h, w):
     """Crop [B,C,H,W] -> [B,C,h,w] at (top,left). Same coords for every input."""
     return t[..., int(top):int(top) + int(h), int(left):int(left) + int(w)]
+
+
+# ── §3/§4 the five q_opt modes ──────────────────────────────────────────────
+#
+#   FF   full proposal -> full target            (what the dev evaluator does)
+#   FC   full proposal -> crop target            (isolates the crop/target effect)
+#   CC   crop proposal -> crop target            (no geometry augmentation)
+#   CCG  crop+geometry proposal -> crop+geom target   <- what training sees
+#   FCG  full proposal, cropped+geometry target  (control: geometry must not
+#        change the target algebra, only the proposal's response to it)
+
+def mode_ff(y0, hr, d_full):
+    return qopt_components(y0, hr, d_full)
+
+
+def mode_fc(y0, hr, d_full, box):
+    top, left, sz, _ = box
+    return qopt_components(crop_tensor(y0, top, left, sz, sz),
+                           crop_tensor(hr, top, left, sz, sz),
+                           crop_tensor(d_full, top, left, sz, sz))
+
+
+def mode_cc(y0, hr, ref, box, proposal_fn):
+    top, left, sz, _ = box
+    y0c = crop_tensor(y0, top, left, sz, sz)
+    rc = crop_tensor(ref, top, left, sz, sz)
+    _sr, aux = proposal_fn(y0c, rc)
+    D = aux['gate'] * aux['delta']
+    return qopt_components(y0c, crop_tensor(hr, top, left, sz, sz), D), aux, D
+
+
+def mode_ccg(y0, hr, ref, box, proposal_fn):
+    """The mode that matches verifier training: crop, THEN the same rot/flip
+    the dataset applies, then the proposal."""
+    top, left, sz, (k, fh, fw) = box
+    y0g = apply_geometry(crop_tensor(y0, top, left, sz, sz), k, fh, fw)
+    hrg = apply_geometry(crop_tensor(hr, top, left, sz, sz), k, fh, fw)
+    rg = apply_geometry(crop_tensor(ref, top, left, sz, sz), k, fh, fw)
+    _sr, aux = proposal_fn(y0g, rg)
+    D = aux['gate'] * aux['delta']
+    return qopt_components(y0g, hrg, D), aux, D
+
+
+def mode_fcg(y0, hr, d_full, box):
+    top, left, sz, (k, fh, fw) = box
+    return qopt_components(
+        apply_geometry(crop_tensor(y0, top, left, sz, sz), k, fh, fw),
+        apply_geometry(crop_tensor(hr, top, left, sz, sz), k, fh, fw),
+        apply_geometry(crop_tensor(d_full, top, left, sz, sz), k, fh, fw))
 
 
 # ── §8 proposal action consistency ──────────────────────────────────────────

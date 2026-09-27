@@ -27,7 +27,8 @@ from local_refine_runtime import metrics                          # noqa: E402
 from model.V3A4Verifier import V3A4Refiner                        # noqa: E402
 from option import parser as option_parser                        # noqa: E402
 from v3a41_runtime import (aggregate_qopt_stats, compare_actions,  # noqa: E402
-                           crop_tensor, qopt_components, read_crop_manifest,
+                           apply_geometry, crop_tensor, mode_cc, mode_ccg,
+                           mode_fc, mode_fcg, qopt_components, read_crop_manifest,
                            verify_v3a41_artifact_lock)
 from v3a4_runtime import load_r1_proposal_strict                  # noqa: E402
 from v3a_runtime import exposure_gain                             # noqa: E402
@@ -47,6 +48,9 @@ def main():
     ap.add_argument('--data_dir', default='/root/data/datasets/lol-v2-real')
     ap.add_argument('--variant', default='nanobanana_ref_v2')
     ap.add_argument('--cache_name', default='cache_y0_lolbase')
+    ap.add_argument('--splits', default='dev,train')
+    ap.add_argument('--limit', type=int, default=0,
+                    help='debug: only the first N images per split')
     ap.add_argument('--device', default='cuda')
     a = ap.parse_args(_CLI)
     dev = a.device
@@ -79,8 +83,11 @@ def main():
     acc = {}          # (split, mode, state) -> list of per-pixel tensors
     per_image = []    # §9
     act_rows = []     # §8
-    for tag, ids in (('train', split['train']), ('dev', split['dev'])):
+    for tag in [s.strip() for s in a.splits.split(',') if s.strip()]:
+        ids = split['train' if tag == 'train' else 'dev']
         rows = [all_pairs[i] for i in ids]
+        if a.limit:
+            rows = rows[:a.limit]
         ds = TrainSet(ns, crop_size=0, pairs=rows,
                       y0_cache=os.path.join(a.src_root, a.cache_name,
                                             'refiner_train'), split='Train')
@@ -108,36 +115,52 @@ def main():
                         acc.setdefault((tag, 'FF', s), {}).setdefault(k, []).append(
                             c[k].flatten().cpu())
                     img_rec['FF_%s' % s] = float(c['q_opt'].mean())
-                    # ---- FC + CC per crop
+                    # ---- FC / FCG / CC / CCG per crop
                     cc_q, cc_d = [], []
                     for cr in cl:
                         top, left = int(cr['top']), int(cr['left'])
                         sz = int(cr['height'])
+                        geom = (int(cr['rot_k']), int(cr['flip_h']), int(cr['flip_w']))
+                        box = (top, left, sz, geom)
                         y0c = crop_tensor(y0d, top, left, sz, sz)
-                        hrc = crop_tensor(hrd, top, left, sz, sz)
                         d_fc = crop_tensor(D_full, top, left, sz, sz)
-                        cfc = qopt_components(y0c, hrc, d_fc)
-                        for k in ('q_opt', 'q_raw', 'N', 'Z', 'energy'):
-                            acc.setdefault((tag, 'FC', s), {}).setdefault(k, []).append(
-                                cfc[k].flatten().cpu())
-                        rc = crop_tensor(rd, top, left, sz, sz)
-                        _s2, aux2 = model.proposal(y0c, rc)
-                        d_cc = aux2['gate'] * aux2['delta']
-                        ccc = qopt_components(y0c, hrc, d_cc)
-                        for k in ('q_opt', 'q_raw', 'N', 'Z', 'energy'):
-                            acc.setdefault((tag, 'CC', s), {}).setdefault(k, []).append(
-                                ccc[k].flatten().cpu())
-                        cc_q.append(float(ccc['q_opt'].mean()))
-                        cc_d.append(float(cfc['q_opt'].mean()))
+                        c_fc = mode_fc(y0d, hrd, D_full, box)
+                        c_fcg = mode_fcg(y0d, hrd, D_full, box)
+                        c_cc, aux_cc, d_cc = mode_cc(y0d, hrd, rd, box,
+                                                     model.proposal)
+                        c_ccg, aux_ccg, d_ccg = mode_ccg(y0d, hrd, rd, box,
+                                                         model.proposal)
+                        for m_name, mc in (('FC', c_fc), ('FCG', c_fcg),
+                                           ('CC', c_cc), ('CCG', c_ccg)):
+                            for k in ('q_opt', 'q_raw', 'N', 'Z', 'energy'):
+                                acc.setdefault((tag, m_name, s), {}).setdefault(
+                                    k, []).append(mc[k].flatten().cpu())
+                        cc_q.append(float(c_cc['q_opt'].mean()))
+                        cc_d.append(float(c_fc['q_opt'].mean()))
+                        y0g = apply_geometry(y0c, *geom)
+                        # §8: compare the crop-context proposal against the
+                        # crop+geometry proposal. CCG sees what training sees.
                         m8 = compare_actions(d_fc, d_cc)
+                        m8.update(geom='%d%d%d' % geom,
+                                  FCG_minus_FC=float(c_fcg['q_opt'].mean()
+                                                     - c_fc['q_opt'].mean()),
+                                  CCG_minus_CC=float(c_ccg['q_opt'].mean()
+                                                     - c_cc['q_opt'].mean()))
                         m8.update(sample_id=name, split=tag, crop_id=int(cr['crop_id']),
                                   state=s,
                                   gate_MAE=float((aux['gate'][..., top:top + sz,
                                                           left:left + sz]
-                                                  - aux2['gate']).abs().mean()),
+                                                  - aux_cc['gate']).abs().mean()),
                                   delta_MAE=float((crop_tensor(aux['delta'], top, left,
                                                                sz, sz)
-                                                   - aux2['delta']).abs().mean()))
+                                                   - aux_cc['delta']).abs().mean()),
+                                  # CC vs CCG: pure augmentation effect
+                                  gate_MAE_geom=float(
+                                      (apply_geometry(aux_cc['gate'], *geom)
+                                       - aux_ccg['gate']).abs().mean()),
+                                  delta_MAE_geom=float(
+                                      (apply_geometry(aux_cc['delta'], *geom)
+                                       - aux_ccg['delta']).abs().mean()))
                         act_rows.append(m8)
                     img_rec['FC_%s' % s] = float(np.mean(cc_d))
                     img_rec['CC_%s' % s] = float(np.mean(cc_q))
@@ -151,20 +174,26 @@ def main():
         comp = {k: torch.cat(v) for k, v in blobs.items()}
         summary['%s|%s|%s' % (tag, mode, s)] = aggregate_qopt_stats(comp, eps_e)
         del comp
+    MODES = ('FF', 'FC', 'FCG', 'CC', 'CCG')
+    MODE_DESC = {'FF': ('full', 'full', 'none'),
+                 'FC': ('full', 'crop', 'none'),
+                 'FCG': ('full', 'crop', 'train-geometry(control)'),
+                 'CC': ('crop', 'crop', 'none'),
+                 'CCG': ('crop', 'crop', 'train-geometry')}
     for tag in ('train', 'dev'):
-        for mode in ('FF', 'FC', 'CC'):
+        for mode in MODES:
             c = summary['%s|%s|correct' % (tag, mode)]['q_opt']['mean']
             d = summary['%s|%s|true_dark_g0.5' % (tag, mode)]['q_opt']['mean']
             m = summary['%s|%s|mismatch' % (tag, mode)]['q_opt']['mean']
+            prop, tgt, aug = MODE_DESC[mode]
             gap_table.append(dict(split=tag, mode=mode,
-                                  proposal='full' if mode in ('FF', 'FC') else 'crop',
-                                  target='full' if mode == 'FF' else 'crop',
+                                  proposal=prop, target=tgt, augmentation=aug,
                                   gap_gt=c - 0.5 * (d + m),
                                   q_correct=c, q_dark=d, q_mismatch=m))
     # all three states per (split, mode) -- keeping only `correct` made it
     # impossible to tell later whether N, Z or clipping drove a change
     for tag in ('train', 'dev'):
-        for mode in ('FF', 'FC', 'CC'):
+        for mode in MODES:
             blob = {s: summary['%s|%s|%s' % (tag, mode, s)] for s in STATES}
             json.dump(blob, open(os.path.join(
                 a.root, 'qopt_audit', '%s_%s.json' % (tag, mode.lower())), 'w',
@@ -175,7 +204,7 @@ def main():
     for tag in ('train', 'dev'):
         recs = [r for r in per_image if r['split'] == tag]
         modes = {}
-        for mode in ('FF', 'FC', 'CC'):
+        for mode in MODES:
             g = np.array([r['%s_correct' % mode] - 0.5 * (r['%s_true_dark_g0.5' % mode]
                                                            + r['%s_mismatch' % mode])
                           for r in recs])
@@ -189,18 +218,29 @@ def main():
                               p90=float(np.percentile(v, 90)),
                               frac_pos=float((v > 0).mean()))
                       for m, v in modes.items()}),
-            corr_FF_FC=cor(modes['FF'], modes['FC']),
-            corr_FC_CC=cor(modes['FC'], modes['CC']),
-            corr_FF_CC=cor(modes['FF'], modes['CC']))
+            corr={
+                'FF_FC': cor(modes['FF'], modes['FC']),
+                'FC_CC': cor(modes['FC'], modes['CC']),
+                'CC_CCG': cor(modes['CC'], modes['CCG']),
+                'FF_CCG': cor(modes['FF'], modes['CCG']),
+                'FC_FCG': cor(modes['FC'], modes['FCG'])})
 
     # ---- §8 action consistency summary
-    act = np.array([[r['MAE'], r['RMSE'], r['cosine'], r['norm_ratio'],
-                     r['gate_MAE'], r['delta_MAE']] for r in act_rows])
-    act_summary = dict(
-        n=len(act_rows),
-        D_MAE=float(act[:, 0].mean()), D_RMSE=float(act[:, 1].mean()),
-        cosine=float(act[:, 2].mean()), norm_ratio=float(act[:, 3].mean()),
-        gate_MAE=float(act[:, 4].mean()), delta_MAE=float(act[:, 5].mean()))
+    # A single pooled average would hide e.g. a mismatch-only crop-context
+    # shift, so report per split x state as well.
+    keys = ('MAE', 'RMSE', 'cosine', 'norm_ratio', 'gate_MAE', 'delta_MAE',
+            'gate_MAE_geom', 'delta_MAE_geom', 'FCG_minus_FC', 'CCG_minus_CC')
+
+    def _agg(rs):
+        return {k: float(np.mean([r[k] for r in rs])) for k in keys}
+
+    act_summary = dict(n=len(act_rows), pooled=_agg(act_rows),
+                       by_split_state={})
+    for tag in ('train', 'dev'):
+        for s in STATES:
+            sub = [r for r in act_rows if r['split'] == tag and r['state'] == s]
+            if sub:
+                act_summary['by_split_state']['%s|%s' % (tag, s)] = _agg(sub)
 
     json.dump(dict(gap_table=gap_table, per_image=per, action=act_summary),
               open(os.path.join(a.root, 'qopt_audit', 'summary.json'), 'w',
@@ -222,28 +262,40 @@ def main():
     # ---- report
     print()
     print('══ D1: gap_gt 表（§7 / §19 表 1） ══')
-    print('  %-6s %-4s %-9s %-6s %10s %10s %10s %10s'
-          % ('split', 'mode', 'proposal', 'target', 'gap_gt', 'q_corr', 'q_dark', 'q_mis'))
+    print('  %-6s %-4s %-8s %-6s %-18s %10s %10s %10s %10s'
+          % ('split', 'mode', 'proposal', 'target', 'augmentation', 'gap_gt',
+             'q_corr', 'q_dark', 'q_mis'))
     for r in gap_table:
-        print('  %-6s %-4s %-9s %-6s %+10.4f %10.4f %10.4f %10.4f'
-              % (r['split'], r['mode'], r['proposal'], r['target'], r['gap_gt'],
-                 r['q_correct'], r['q_dark'], r['q_mismatch']))
+        print('  %-6s %-4s %-8s %-6s %-18s %+10.4f %10.4f %10.4f %10.4f'
+              % (r['split'], r['mode'], r['proposal'], r['target'],
+                 r['augmentation'], r['gap_gt'], r['q_correct'], r['q_dark'],
+                 r['q_mismatch']))
     print()
     print('  per-image gap:')
     for tag in ('train', 'dev'):
         p = per[tag]
         print('    %-6s ' % tag + '  '.join(
             '%s %+.3f(pos %.2f)' % (m, p['gap'][m]['mean'], p['gap'][m]['frac_pos'])
-            for m in ('FF', 'FC', 'CC')))
-        print('           corr FF-FC %+.3f  FC-CC %+.3f  FF-CC %+.3f'
-              % (p['corr_FF_FC'], p['corr_FC_CC'], p['corr_FF_CC']))
+            for m in MODES))
+        print('           corr ' + '  '.join('%s %+.3f' % (k, v)
+                                              for k, v in p['corr'].items()))
     print()
-    print('══ D1: proposal action consistency FC vs CC (§8) ══')
-    print('  n=%d  D_MAE %.4f  D_RMSE %.4f  cosine %.4f  norm_ratio %.4f'
-          % (act_summary['n'], act_summary['D_MAE'], act_summary['D_RMSE'],
-             act_summary['cosine'], act_summary['norm_ratio']))
-    print('  gate_MAE %.4f  delta_MAE %.4f'
-          % (act_summary['gate_MAE'], act_summary['delta_MAE']))
+    print('══ D1: proposal action consistency (§8) ══')
+    print('  pooled (n=%d): D_MAE %.4f  cosine %.4f  norm_ratio %.4f  '
+          'gate_MAE %.4f  geom gate_MAE %.4f'
+          % (act_summary['n'], act_summary['pooled']['MAE'],
+             act_summary['pooled']['cosine'], act_summary['pooled']['norm_ratio'],
+             act_summary['pooled']['gate_MAE'],
+             act_summary['pooled']['gate_MAE_geom']))
+    print('  %-14s %9s %9s %9s %11s' % ('split|state', 'D_MAE', 'cosine',
+                                         'gate_MAE', 'geom_gate'))
+    for k, v in act_summary['by_split_state'].items():
+        print('  %-14s %9.4f %9.4f %9.4f %11.4f'
+              % (k, v['MAE'], v['cosine'], v['gate_MAE'], v['gate_MAE_geom']))
+    print('  geometry control: FCG-FC %+.4f (should be ~0)   '
+          'augmentation effect: CCG-CC %+.4f'
+          % (act_summary['pooled']['FCG_minus_FC'],
+             act_summary['pooled']['CCG_minus_CC']))
 
 
 if __name__ == '__main__':
