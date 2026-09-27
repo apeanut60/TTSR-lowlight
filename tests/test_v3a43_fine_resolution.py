@@ -365,7 +365,13 @@ def test_smoke_reaches_aggregation_and_repro_path():
         assert s['protocol']['git_head'] == lock['repo_commit']
         assert len(s['protocol']['git_dirty']) == \
             min(s['protocol']['git_dirty_count'], 20)
-        assert 'smoke run' in out, out[-1500:]       # dirty smoke must say so
+        # The warning line must appear IFF the subprocess really was dirty. This
+        # test runs from whatever tree state the caller has -- the runner is
+        # expected to be CLEAN (commit first), so it must never assume dirtiness.
+        # The dirty-warning path itself is pinned deterministically by
+        # test_formal_run_refuses_a_dirty_tree().
+        dirty = s['protocol']['git_dirty_count'] > 0
+        assert ('git WARNING' in out) == dirty, out[-1500:]
         assert s['nesting_summary']['all_nested'] is True
         assert s['nesting_summary']['mse_chain_violations'] == 0
         for arm in ('R1', 'G16', 'G32', 'G64', 'Block_H4', 'Spatial_H4_legacy'):
