@@ -157,12 +157,16 @@ def main():
             geo['g64']['pixel_edges_x'] != [int(v) for v in ref_level['pixel_edges_x']]:
         raise SystemExit('our G64 pixel edges differ from the frozen V3-A.4.3 '
                          'nesting.json -- refusing to write a geometry artifact')
-    cell_y = int(base_y[1] - base_y[0])
-    for name, edges in (('y', geo['g64']['pixel_edges_y']),
-                        ('x', geo['g64']['pixel_edges_x'])):
-        cell = cell_y if name == 'y' else int(base_x[1] - base_x[0])
-        if any(int(v) % cell for v in edges):
-            raise SystemExit('G64 %s pixel edges are not on the base-cell lattice' % name)
+    # structural check on the PIXEL lattice: every G64 pixel edge must be a
+    # Block_H4 cell edge (the base-index edges are 0,1,2,... so testing those
+    # would be vacuous -- the base cells are not 1 px wide)
+    for name, edges, dense_edges in (
+            ('y', geo['g64']['pixel_edges_y'],
+             geo['dense_block_h4']['pixel_edges_y']),
+            ('x', geo['g64']['pixel_edges_x'],
+             geo['dense_block_h4']['pixel_edges_x'])):
+        if not set(int(v) for v in edges) <= set(int(v) for v in dense_edges):
+            raise SystemExit('G64 %s pixel edges are not Block_H4 cell edges' % name)
     geometry = dict(
         native_feature_shape=geo['native_feature_shape'],
         dense=dict(shape=geo['dense_block_h4']['shape'],

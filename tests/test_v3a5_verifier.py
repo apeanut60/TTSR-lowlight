@@ -133,6 +133,13 @@ def test_g64_feature_pooling_uses_the_oracle_base_partition():
     # and the native support really is the H/4 lattice
     assert geom['native_shape'] == (100, 150)
     assert tuple(base['shape']) == geom['native_shape']
+    # the setup guard is a PIXEL-lattice subset test (the base-index edges are
+    # 0,1,2,... so a modulo check on those would be vacuous)
+    dense_y = set(base['pixel_edges_y'] if 'pixel_edges_y' in base
+                  else target_geometry(H, W, 'dense_block_h4')['edges'][0].tolist())
+    assert set(int(v) for v in geom['edges'][0].tolist()) <= dense_y
+    assert dense_y == set(range(0, H + 1, 4))
+    assert not {3, 7} <= dense_y          # a bad edge set is really rejected
 
 
 def test_exact_g64_feature_pool_has_no_overlap_or_gap():
@@ -564,6 +571,14 @@ def test_smoke_setup_accept_train_eval():
             [sys.executable, '-W', 'ignore', check, '--root', tmp, '--limit', '1'],
             stderr=subprocess.STDOUT).decode()
         assert 'checks passed' in out and 'Traceback' not in out, out[-2000:]
+        # §26: --v43_root must NOT be able to redirect an experiment input; the
+        # nesting file and the reproduction table both come from the lock
+        bogus = os.path.join(tmp, 'bogus_v43')
+        os.makedirs(bogus, exist_ok=True)
+        out = subprocess.check_output(
+            [sys.executable, '-W', 'ignore', check, '--root', tmp, '--limit', '1',
+             '--v43_root', bogus], stderr=subprocess.STDOUT).decode()
+        assert 'checks passed' in out, out[-2000:]
         for arm in ARMS:
             out = subprocess.check_output(
                 [sys.executable, '-W', 'ignore', train, '--root', tmp, '--arm', arm,

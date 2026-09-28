@@ -125,9 +125,11 @@ def main():
 
     dev64 = prepare_geometry(target_geometry(400, 600, 'g64'), a.device)
     devh4 = prepare_geometry(target_geometry(400, 600, 'dense_block_h4'), a.device)
+    # the reproduction table is an INPUT, so it must come from the lock -- not
+    # from --v43_root. Otherwise the nesting check could read tree A while the
+    # reproduction reads tree B.
     frozen = {(r['split'], r['state'], r['sample_id']): r for r in
-              csv.DictReader(open(os.path.join(a.v43_root, 'oracle',
-                                               'per_image.csv'), encoding='utf-8'))}
+              csv.DictReader(open(lock['v3a43_per_image_path'], encoding='utf-8'))}
     n = len(rows) if not a.limit else min(a.limit, len(rows))
     worst_psnr, worst_cap, seen = 0.0, 0.0, 0
     with torch.no_grad():
