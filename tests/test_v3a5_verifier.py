@@ -29,10 +29,11 @@ from v3a5_runtime import (ARMS, MODES, STATES, STATE_PROBS,        # noqa: E402
                           check_worktree, energy_mask, energy_threshold,
                           expand_gate, gate_metrics, geometry_report,
                           masked_smooth_l1, parameter_l1_drift,
-                          per_image_qmean_corr, pixel_energy, prepare_geometry,
-                          recovery, sample_states, snapshot_, state_dict_sha,
-                          target_geometry, verdict_5a, verifier_loss,
-                          verify_v3a5_artifact_lock)
+                          per_image_qmean_corr, pixel_energy,
+                          pool_feature_by_geom, pool_geometry_audit,
+                          prepare_geometry, recovery, sample_states, snapshot_,
+                          state_dict_sha, target_geometry, validate_run_protocol,
+                          verdict_5a, verifier_loss, verify_v3a5_artifact_lock)
 
 SRC = '/root/data/experiments/v3a1_lolv2real'
 V4 = '/root/data/experiments/v3a4_lolv2real'
@@ -100,11 +101,92 @@ def test_expansion_matches_the_oracle_expansion():
         assert torch.equal(expand_gate(tgt['q_grid'], geom), tgt['q_full']), mode
 
 
-def test_no_pooling_or_resize_of_any_gate():
-    """Static guard: coarse targets must be re-solved, never pooled/resized."""
-    src = open(os.path.join(ROOT, 'v3a5_runtime.py'), encoding='utf-8').read()
-    for token in ('interpolate', 'avg_pool', 'adaptive_avg'):
-        assert token not in src, 'v3a5_runtime must not use %s' % token
+def test_v3a5_main_path_has_no_adaptive_pooling():
+    """§11: neither the gate path nor the FEATURE path may use adaptive pooling
+    or interpolation -- A1 needs the exact nested G64 partition, not 'about
+    64x64'. Scans the model as well, which the earlier guard missed."""
+    for rel in ('v3a5_runtime.py', os.path.join('model', 'V3A5Verifier.py')):
+        src = open(os.path.join(ROOT, rel), encoding='utf-8').read()
+        for token in ('adaptive_avg_pool', 'adaptive_max_pool', 'interpolate',
+                      'avg_pool'):
+            assert token not in src, '%s uses %s' % (rel, token)
+
+
+# ── §8-§10 exact G64 feature pooling == oracle partition ────────────────────
+
+def test_g64_feature_pooling_uses_the_oracle_base_partition():
+    """The pooling partition must be the V3-A.4.3 G64 grouping, verified against
+    the frozen nesting.json rather than against our own re-derivation."""
+    geom = target_geometry(H, W, 'g64')
+    # real check: base-index edges x CELL SIZE == the frozen pixel edges
+    base = target_geometry(H, W, 'dense_block_h4')
+    cell_y = int(base['edges'][0][1] - base['edges'][0][0])
+    cell_x = int(base['edges'][1][1] - base['edges'][1][0])
+    nesting = json.load(open(os.path.join(V43, 'oracle', 'nesting.json'),
+                             encoding='utf-8'))['levels']['64']
+    np.testing.assert_array_equal(
+        np.asarray([int(v) // cell_y for v in nesting['pixel_edges_y']]),
+        geom['base_index_edges'][0])
+    np.testing.assert_array_equal(
+        np.asarray([int(v) // cell_x for v in nesting['pixel_edges_x']]),
+        geom['base_index_edges'][1])
+    # and the native support really is the H/4 lattice
+    assert geom['native_shape'] == (100, 150)
+    assert tuple(base['shape']) == geom['native_shape']
+
+
+def test_exact_g64_feature_pool_has_no_overlap_or_gap():
+    geom = target_geometry(H, W, 'g64')
+    audit = pool_geometry_audit(100, 150, geom)
+    assert audit['shape'] == [64, 64] and audit['n_blocks'] == 64 * 64
+    assert audit['idx_size'] == 15000 and audit['native_cells'] == 15000
+    assert audit['all_cells_covered_once'] and audit['no_empty_block']
+    # y: 100 cells -> 64 blocks = 1-2 cells; x: 150 -> 64 = 2-3 cells
+    assert audit['min_block'] >= 2 and audit['max_block'] <= 6
+    assert audit['total_cells'] == 15000
+
+
+def test_exact_g64_pool_matches_hand_computed_block_means():
+    """F[y,x] = y*1000 + x; compare against a direct slice mean."""
+    geom = target_geometry(H, W, 'g64')
+    f = (torch.arange(100).view(1, 1, 100, 1) * 1000
+         + torch.arange(150).view(1, 1, 1, 150)).float()
+    pooled = pool_feature_by_geom(f, geom)
+    iy, ix = geom['base_index_edges']
+    assert pooled.shape == (1, 1, 64, 64)
+    for bi, bj in ((0, 0), (1, 1), (31, 31), (63, 63), (0, 63), (17, 40)):
+        want = f[0, 0, iy[bi]:iy[bi + 1], ix[bj]:ix[bj + 1]].mean()
+        got = pooled[0, 0, bi, bj]
+        assert abs(float(got) - float(want)) < 1e-6, (bi, bj, float(got), float(want))
+    # a constant map pools to that constant (exact non-overlap mean)
+    c = torch.full((1, 3, 100, 150), 0.7)
+    assert torch.allclose(pool_feature_by_geom(c, geom),
+                          torch.full((1, 3, 64, 64), 0.7), atol=1e-6)
+    # and a non-native input is refused rather than silently pooled
+    _expect_fail(lambda: pool_feature_by_geom(torch.zeros(1, 1, 64, 64), geom),
+                 'pooling a non-native feature map')
+
+
+def test_pooling_partition_equals_the_target_partition():
+    """§2/§29 on the REAL geometry: colour every native H/4 cell with the G64
+    block id the ORACLE assigns to it, pool, and require the pooled value to be
+    exactly that block's index. This can only hold if the feature-pooling
+    partition and the target partition are literally the same partition."""
+    geom = prepare_geometry(target_geometry(H, W, 'g64'), 'cpu')
+    nby, nbx = geom['shape']
+    cell = 4                                    # H/4 base cell is 4x4 px
+    f = torch.zeros(1, 1, 100, 150)
+    ids = geom['index'].reshape(H, W)
+    for i in range(100):
+        for j in range(150):
+            blk = int(ids[i * cell, j * cell])
+            # every pixel of one base cell must belong to the same G64 block
+            blk_patch = ids[i * cell:(i + 1) * cell, j * cell:(j + 1) * cell]
+            assert np.all(blk_patch == blk), (i, j)
+            f[0, 0, i, j] = blk
+    pooled = pool_feature_by_geom(f, geom)
+    want = torch.arange(nby * nbx, dtype=pooled.dtype).reshape(nby, nbx)
+    assert torch.equal(pooled[0, 0], want), 'pooling != target partition'
 
 
 # ── §12 energy mask ─────────────────────────────────────────────────────────
@@ -188,30 +270,38 @@ def test_both_arms_start_at_a_constant_half_gate():
         m = V3A5Verifier(mode).eval()
         geom = prepare_geometry(target_geometry(64, 96, mode), 'cpu')
         with torch.no_grad():
-            q = m(x, y0, hr, target_shape=geom['shape'],
-                  strict_native=(mode == 'dense_block_h4'))
+            q = m(x, y0, hr, geom=geom)
         assert q.shape[-2:] == geom['shape'], (mode, q.shape)
         assert float(q.min()) == float(q.max()) == 0.5, mode
-        # identical step-0 output at the same q
+    # identical step-0 output across arms on the REAL geometry (the constant
+    # gate masks any pooling difference, which is why this must be asserted)
     m0 = V3A5Verifier('dense_block_h4').eval()
     m1 = V3A5Verifier('g64').eval()
-    g0 = prepare_geometry(target_geometry(64, 96, 'dense_block_h4'), 'cpu')
-    g1 = prepare_geometry(target_geometry(64, 96, 'g64'), 'cpu')
+    g0 = prepare_geometry(target_geometry(H, W, 'dense_block_h4'), 'cpu')
+    g1 = prepare_geometry(target_geometry(H, W, 'g64'), 'cpu')
+    y0r, hr_r, D_r = _rand(5)
+    xr = torch.rand_like(y0r)
     with torch.no_grad():
-        y_0 = y0 + expand_gate(m0(x, y0, hr, g0['shape'], True) * 0 + 0.5, g0) * D
-        y_1 = y0 + expand_gate(m1(x, y0, hr, g1['shape']) * 0 + 0.5, g1) * D
+        y_0 = y0r + expand_gate(m0(xr, y0r, hr_r, geom=g0) * 0 + 0.5, g0) * D_r
+        y_1 = y0r + expand_gate(m1(xr, y0r, hr_r, geom=g1) * 0 + 0.5, g1) * D_r
     assert torch.equal(y_0, y_1), 'step0 outputs differ across arms'
 
 
 def test_dense_arm_refuses_to_silently_repool():
-    y0, _hr, _D = _rand(6, h=64, w=96)
+    # must use the real 400x600 geometry: on a tiny image the G64 chain
+    # degenerates onto the native lattice, so both supports coincide
+    y0, _hr, _D = _rand(6)
     m = V3A5Verifier('dense_block_h4').eval()
     with torch.no_grad():
-        # native H/4 for 64x96 is 16x24; asking for anything else must fail
-        _expect_fail(lambda: m(y0, y0, y0, target_shape=(8, 8), strict_native=True),
+        native = target_geometry(H, W, 'dense_block_h4')
+        g64 = target_geometry(H, W, 'g64')
+        assert native['shape'] == (100, 150) and g64['shape'] == (64, 64)
+        _expect_fail(lambda: m(y0, y0, y0, geom=g64),
                      'dense arm re-pooled a different partition')
-        q = m(y0, y0, y0, target_shape=(16, 24), strict_native=True)
-        assert q.shape[-2:] == (16, 24)
+        q = m(y0, y0, y0, geom=native)
+        assert q.shape[-2:] == tuple(native['shape'])
+        # and the G64 arm really pools onto the oracle support
+        assert V3A5Verifier('g64').eval()(y0, y0, y0, geom=g64).shape[-2:] == (64, 64)
 
 
 def test_proposal_snapshot_detects_drift():
@@ -290,6 +380,10 @@ def _write_lock(tmp, energy_sha=None, commit=None):
     e = os.path.join(tmp, 'targets', 'energy_stats.json')
     if not os.path.isfile(e):
         json.dump({'threshold': 1e-4}, open(e, 'w'))
+    g = os.path.join(tmp, 'targets', 'geometry.json')
+    if not os.path.isfile(g):
+        json.dump(geometry_report(H, W, {m: target_geometry(H, W, m)
+                                         for m in MODES}), open(g, 'w'))
     lock = dict(
         repo_commit=commit,
         proposal_sha256=v4['proposal_sha256'],
@@ -300,10 +394,18 @@ def _write_lock(tmp, energy_sha=None, commit=None):
         mismatch_dev_sha256=v4['mismatch_dev_sha256'],
         v3a43_summary_sha256=_sha256(os.path.join(V43, 'oracle', 'summary.json')),
         v3a43_nesting_sha256=_sha256(os.path.join(V43, 'oracle', 'nesting.json')),
+        v3a43_per_image_sha256=_sha256(os.path.join(V43, 'oracle', 'per_image.csv')),
+        v3a43_root=V43,
+        v3a43_summary_path=os.path.join(V43, 'oracle', 'summary.json'),
+        v3a43_nesting_path=os.path.join(V43, 'oracle', 'nesting.json'),
+        v3a43_per_image_path=os.path.join(V43, 'oracle', 'per_image.csv'),
+        geometry_sha256=_sha256(g),
         energy_stats_sha256=energy_sha or _sha256(e),
         states='+'.join(STATES), target_family='nested_blockwise_action_optimal',
+        reference_variant='nanobanana_ref_v2', cache_name='cache_y0_lolbase',
+        state_probs=list(STATE_PROBS),
         arms=list(ARMS), steps=3000, grad_accum_default=4, seed=42,
-        energy_threshold=1e-4)
+        block_h4_factor=4, energy_threshold=1e-4, energy_pctl=10.0)
     path = os.path.join(tmp, 'artifact_lock.json')
     json.dump(lock, open(path, 'w', encoding='utf-8'), indent=2, sort_keys=True)
     return path, lock
@@ -327,6 +429,28 @@ def test_lock_and_worktree_guards():
         _expect_fail(lambda: verify_v3a5_artifact_lock(tmp, SRC, v4_root=V4,
                                                        v43_root=V43),
                      'tampered V3-A.4.3 summary')
+        bad = dict(lock, v3a43_per_image_sha256='0' * 64)
+        json.dump(bad, open(path, 'w', encoding='utf-8'))
+        _expect_fail(lambda: verify_v3a5_artifact_lock(tmp, SRC, v4_root=V4,
+                                                       v43_root=V43),
+                     'tampered V3-A.4.3 per_image')
+        bad = dict(lock, geometry_sha256='0' * 64)
+        json.dump(bad, open(path, 'w', encoding='utf-8'))
+        _expect_fail(lambda: verify_v3a5_artifact_lock(tmp, SRC, v4_root=V4,
+                                                       v43_root=V43),
+                     'tampered geometry artifact')
+        # the v43 anchors are addressed through the lock, so pointing the CLI at
+        # a different tree cannot redirect the eval
+        alt = tempfile.mkdtemp(prefix='v3a5_other_v43_')
+        try:
+            bad = dict(lock, v3a43_root=alt)
+            json.dump(bad, open(path, 'w', encoding='utf-8'))
+            _expect_fail(lambda: verify_v3a5_artifact_lock(tmp, SRC, v4_root=V4,
+                                                           v43_root=V43),
+                         'lock pointing at a tree without the anchors')
+        finally:
+            shutil.rmtree(alt, ignore_errors=True)
+        json.dump(lock, open(path, 'w', encoding='utf-8'), indent=2, sort_keys=True)
         bad = dict(lock, repo_commit='deadbeef' * 5)
         json.dump(bad, open(path, 'w', encoding='utf-8'))
         _expect_fail(lambda: verify_v3a5_artifact_lock(tmp, SRC, v4_root=V4,
@@ -344,6 +468,83 @@ def test_lock_and_worktree_guards():
     _h, _d, warn = check_worktree(2, head=head, dirty=dirty)
     assert warn and 'smoke run' in warn
     assert check_worktree(0, head=head, dirty=[]) == (head, [], None)
+
+
+def test_formal_training_refuses_a_protocol_change():
+    """§18-§21: seed / steps / grad_accum / variant / cache_name are protocol."""
+    lock = dict(reference_variant='nanobanana_ref_v2', cache_name='cache_y0_lolbase',
+                seed=42, steps=3000, grad_accum_default=4, block_h4_factor=4,
+                energy_threshold=1e-4, energy_pctl=10.0)
+    # formal: everything must match exactly
+    eff = validate_run_protocol(lock, formal=True, seed=42, steps=3000,
+                               grad_accum=4, variant='nanobanana_ref_v2',
+                               cache_name='cache_y0_lolbase')
+    assert eff['seed'] == 42 and eff['steps'] == 3000
+    for kwargs, what in ((dict(seed=43), '--seed'),
+                         (dict(steps=1500), '--steps'),
+                         (dict(grad_accum=8), '--grad_accum')):
+        _expect_fail(lambda k=kwargs: validate_run_protocol(lock, formal=True,
+                                                           **k), what)
+    # variant / cache are protocol even in a smoke
+    for kwargs, what in ((dict(variant='v3'), '--variant'),
+                         (dict(cache_name='other_cache'), '--cache_name')):
+        _expect_fail(lambda k=kwargs: validate_run_protocol(lock, formal=False,
+                                                           **k), what)
+        _expect_fail(lambda k=kwargs: validate_run_protocol(lock, formal=True,
+                                                           **k), what)
+    # a smoke may shorten the schedule and reseed
+    eff = validate_run_protocol(lock, formal=False, seed=7, steps=4, grad_accum=1)
+    assert eff['seed'] == 7 and eff['steps'] == 4 and eff['grad_accum'] == 1
+    assert eff['variant'] == lock['reference_variant']     # still from the lock
+
+
+def test_setup_mask_valid_fraction_matches_training_definition(tmp=None):
+    """§17: the reported G64 valid fraction must equal what training computes."""
+    import tempfile as _tf
+    tmp = _tf.mkdtemp(prefix='v3a5_mask_')
+    try:
+        setup = os.path.join(ROOT, 'scripts', 'setup_v3a5_verifier.py')
+        subprocess.check_output([sys.executable, '-W', 'ignore', setup,
+                                 '--root', tmp, '--limit', '2'],
+                                stderr=subprocess.STDOUT)
+        e = json.load(open(os.path.join(tmp, 'targets', 'energy_stats.json'),
+                           encoding='utf-8'))
+        thr = float(e['threshold'])
+        assert abs(thr - float(e['p10'] if 'p10' in e else e['pool']['p10'])) < 1e-12
+        # recompute both fractions from the same definition the trainer uses
+        sys.path.insert(0, ROOT)
+        from option import parser as option_parser
+        from v3a5_pipeline import (correction, load_proposal, load_rows,
+                                   make_dataset, sample_tensors)
+        ns = option_parser.parse_args([])
+        ns.dataset_dir = '/root/data/datasets/lol-v2-real'
+        ns.v3a_ref_variant = 'nanobanana_ref_v2'
+        rows = load_rows('/root/data/experiments/v3a1_lolv2real/manifests/'
+                         'refiner_train.csv',
+                         '/root/data/experiments/v3a4_lolv2real/splits/split.json'
+                         )['train'][:2]
+        mm = json.load(open('/root/data/experiments/v3a4_lolv2real/mappings/'
+                            'mismatch_train_575.json', encoding='utf-8'))
+        ds = make_dataset(ns, rows, '/root/data/experiments/v3a1_lolv2real/'
+                          'cache_y0_lolbase/refiner_train', mm)
+        proposal = load_proposal('/root/data/experiments/v3a1_lolv2real/'
+                                 'R1_v2stable_naive_s42/checkpoint_03000.pt', 'cuda')
+        for mode in MODES:
+            geom = prepare_geometry(target_geometry(H, W, mode), 'cuda')
+            fracs = []
+            with torch.no_grad():
+                for i in range(len(rows)):
+                    for state in STATES:
+                        t = sample_tensors(ds, i, state, 'cuda')
+                        D, _sr = correction(proposal.proposal, t['Y0'], t['R'])
+                        fracs.append(float(
+                            energy_mask(block_energy(D, geom), thr).mean()))
+            got = float(np.mean(fracs))
+            want = float(np.mean([e['mask_valid_frac']['%s|%s' % (mode, s)]
+                                  for s in STATES]))
+            assert abs(got - want) < 1e-6, (mode, got, want)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
 
 
 # ── §32 end-to-end smoke ────────────────────────────────────────────────────

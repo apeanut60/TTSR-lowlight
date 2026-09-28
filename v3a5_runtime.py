@@ -24,7 +24,7 @@ import torch.nn.functional as F
 
 from v3a42_runtime import (block_edges, blockwise_action_optimal_gate, git_state,
                            h4_block_grid)
-from v3a43_runtime import build_level_chain
+from v3a43_runtime import nested_index_chain
 
 STATES = ('correct', 'true_dark_g0.5', 'mismatch')
 # §11 locked state weights, realised as sampling probabilities
@@ -43,32 +43,53 @@ ENERGY_PCTL = 10.0
 def target_geometry(height, width, mode, factor=4):
     """-> dict describing one target parameterisation.
 
-    ``edges`` are explicit pixel edges, ``index`` is the flat block id of every
-    pixel (nearest expansion), ``shape`` is (nby, nbx).
+    ONE source of truth for three consumers (§29):
+
+      * ``edges`` (pixel)  -> the oracle target q* and the gate expansion,
+      * ``base_index_edges`` (H/4 base-cell lattice) -> the EXACT region pooling
+        of the verifier feature map,
+      * ``shape``          -> both, and the head's output grid.
+
+    ``index`` is the flat block id of every pixel (nearest expansion).
     """
     if mode not in MODES:
         raise SystemExit('unknown target mode %r' % mode)
     base = h4_block_grid(height, width, factor)
+    by, bx = int(base[0]), int(base[1])
+    # native H/4 lattice: the verifier's common feature map lives exactly here
+    ey_base = block_edges(height, by)
+    ex_base = block_edges(width, bx)
+    n_by, n_bx = len(ey_base) - 1, len(ex_base) - 1
     if mode == 'dense_block_h4':
-        ey = block_edges(height, base[0])
-        ex = block_edges(width, base[1])
+        iy = np.arange(n_by + 1, dtype=np.int64)
+        ix = np.arange(n_bx + 1, dtype=np.int64)
         provenance = 'block_h4_base_cells'
     else:
-        chain = build_level_chain(height, width, base, (G64,))
-        ey, ex = chain['y'][G64], chain['x'][G64]
-        if not chain['all_nested']:
-            raise SystemExit('G64 is not a coarsening of Block_H4: %s'
-                             % chain['containment'])
+        # the same round(linspace) grouping on the base-cell lattice that
+        # V3-A.4.3 used; the pixel edges are its image under ey_base
+        iy = nested_index_chain(n_by, (G64,))[0][G64]
+        ix = nested_index_chain(n_bx, (G64,))[0][G64]
+        if set(int(v) for v in iy) > set(range(n_by + 1)) or \
+                set(int(v) for v in ix) > set(range(n_bx + 1)):
+            raise SystemExit('G64 index edges left the base-cell lattice')
         provenance = 'g64_nested_from_block_h4'
+    ey = np.asarray(ey_base)[iy]
+    ex = np.asarray(ex_base)[ix]
     # The explicit chain edges are the authority. NOTE: the G64 chain edges are
     # NOT round(linspace(0, height, 65)) -- they are base-cell boundaries, so
     # the id map must be built from the edges, never re-derived from a grid size.
     idx, nby, nbx = _cached_index(int(height), int(width),
                                   tuple(int(v) for v in ey),
                                   tuple(int(v) for v in ex))
+    if (nby, nbx) != (len(iy) - 1, len(ix) - 1):
+        raise SystemExit('pixel-edge partition (%d,%d) disagrees with the base-cell '
+                         'partition (%d,%d)' % (nby, nbx, len(iy) - 1, len(ix) - 1))
     return dict(mode=mode, factor=int(factor), base_grid=(int(base[0]), int(base[1])),
                 edges=(np.asarray(ey, dtype=np.int64), np.asarray(ex, dtype=np.int64)),
+                base_index_edges=(np.asarray(iy, dtype=np.int64),
+                                  np.asarray(ix, dtype=np.int64)),
                 index=idx, shape=(int(nby), int(nbx)),
+                native_shape=(int(n_by), int(n_bx)),
                 provenance=provenance)
 
 
@@ -97,19 +118,84 @@ def edges_are_nested(coarse, fine):
 def geometry_report(height, width, geoms):
     """The §30 artifact: edges / block counts / nesting for every arm."""
     out = {}
+    out['native_feature_shape'] = list(geoms['g64']['native_shape'])
     for mode, g in geoms.items():
         ey, ex = g['edges']
+        iy, ix = g['base_index_edges']
         out[mode] = dict(shape=list(g['shape']), base_grid=list(g['base_grid']),
+                         native_shape=list(g['native_shape']),
                          provenance=g['provenance'],
+                         base_index_edges_y=[int(v) for v in iy],
+                         base_index_edges_x=[int(v) for v in ix],
                          pixel_edges_y=[int(v) for v in ey],
                          pixel_edges_x=[int(v) for v in ex],
                          block_h=int(np.diff(ey).min()), block_h_max=int(np.diff(ey).max()),
                          block_w=int(np.diff(ex).min()), block_w_max=int(np.diff(ex).max()))
-    base = geoms['dense_block_h4']['edges']
-    g64 = geoms['g64']['edges']
-    out['nesting'] = dict(g64_within_block_h4=bool(edges_are_nested(g64[0], base[0])
-                                                   and edges_are_nested(g64[1], base[1])))
+    base = geoms['dense_block_h4']['base_index_edges']
+    g64 = geoms['g64']['base_index_edges']
+    # the dense arm's native support IS the Block_H4 partition, so a G64 block
+    # must be a union of dense support cells -- the feature pooling and the
+    # target therefore share one partition by construction
+    out['nesting'] = dict(g64_within_block_h4=bool(
+        edges_are_nested(g64[0], np.arange(len(base[0]))) and
+        edges_are_nested(g64[1], np.arange(len(base[1])))))
     return out
+
+
+# ── §5-§7 exact region pooling on the native H/4 lattice ────────────────────
+
+@lru_cache(maxsize=64)
+def _pool_index(native_h, native_w, iy, ix):
+    """-> (idx [native_h*native_w] block id, counts [nblk]) on the base lattice."""
+    idx = np.empty((native_h, native_w), dtype=np.int64)
+    nby, nbx = len(iy) - 1, len(ix) - 1
+    for i in range(nby):
+        for j in range(nbx):
+            idx[iy[i]:iy[i + 1], ix[j]:ix[j + 1]] = i * nbx + j
+    idx = idx.reshape(-1)
+    counts = np.bincount(idx, minlength=nby * nbx).astype(np.int64)
+    if counts.min() < 1:
+        raise SystemExit('pool geometry has an empty block')
+    if int(counts.sum()) != native_h * native_w:
+        raise SystemExit('pool geometry does not cover the native lattice')
+    return idx, counts, nby, nbx
+
+
+def pool_feature_by_geom(feature, geom):
+    """Exact non-overlap block MEAN of a native-H/4 feature map (§6).
+
+    ``feature`` is [B,C,native_h,native_w]; the partition is the SAME base-cell
+    grouping that produced the oracle target, so the pooled tensor and q* share
+    one geometry. Differentiable, exact, no Python block loop.
+    """
+    if tuple(feature.shape[-2:]) != tuple(geom['native_shape']):
+        raise SystemExit('pool_feature_by_geom expects the native H/4 map %s, got %s'
+                         % (tuple(geom['native_shape']), tuple(feature.shape[-2:])))
+    nh, nw = int(geom['native_shape'][0]), int(geom['native_shape'][1])
+    iy, ix = geom['base_index_edges']
+    idx, counts, nby, nbx = _pool_index(nh, nw, tuple(int(v) for v in iy),
+                                       tuple(int(v) for v in ix))
+    idx_t = torch.as_tensor(idx, dtype=torch.long, device=feature.device)
+    cnt_t = torch.as_tensor(counts, dtype=feature.dtype, device=feature.device)
+    b, c = feature.shape[0], feature.shape[1]
+    flat = feature.reshape(b, c, -1)
+    acc = feature.new_zeros((b, c, nby * nbx))
+    acc.index_add_(2, idx_t, flat)
+    return (acc / cnt_t.clamp(min=1.0)).reshape(b, c, nby, nbx)
+
+
+def pool_geometry_audit(feature_h, feature_w, geom):
+    """§7: no gap / no overlap / exact coverage of the native lattice."""
+    iy, ix = geom['base_index_edges']
+    idx, counts, nby, nbx = _pool_index(int(feature_h), int(feature_w),
+                                       tuple(int(v) for v in iy),
+                                       tuple(int(v) for v in ix))
+    return dict(native_cells=int(feature_h) * int(feature_w), idx_size=int(idx.size),
+                shape=[int(nby), int(nbx)], n_blocks=int(nby * nbx),
+                min_block=int(counts.min()), max_block=int(counts.max()),
+                total_cells=int(counts.sum()),
+                all_cells_covered_once=bool(int(counts.sum()) == int(feature_h) * int(feature_w)),
+                no_empty_block=bool(counts.min() >= 1))
 
 
 # ── §4/§8 oracle target and its expansion ───────────────────────────────────
@@ -334,6 +420,9 @@ def verify_v3a5_artifact_lock(root, src_root,
     if not os.path.isfile(path):
         raise SystemExit('v3a5 artifact lock missing: %s' % path)
     lock = json.load(open(path, encoding='utf-8'))
+    # §26: the V3-A.4.3 anchors are addressed THROUGH THE LOCK, so a run cannot
+    # validate one tree while reading another
+    v43 = lock.get('v3a43_root') or v43_root
     files = {
         'proposal_sha256': os.path.join(src_root, ckpt_name),
         'cache_metadata_sha256': os.path.join(src_root, cache_name,
@@ -344,9 +433,11 @@ def verify_v3a5_artifact_lock(root, src_root,
                                               'mismatch_train_575.json'),
         'mismatch_dev_sha256': os.path.join(v4_root, 'mappings',
                                             'mismatch_dev_64.json'),
-        'v3a43_summary_sha256': os.path.join(v43_root, 'oracle', 'summary.json'),
-        'v3a43_nesting_sha256': os.path.join(v43_root, 'oracle', 'nesting.json'),
+        'v3a43_summary_sha256': os.path.join(v43, 'oracle', 'summary.json'),
+        'v3a43_nesting_sha256': os.path.join(v43, 'oracle', 'nesting.json'),
+        'v3a43_per_image_sha256': os.path.join(v43, 'oracle', 'per_image.csv'),
         'energy_stats_sha256': os.path.join(root, 'targets', 'energy_stats.json'),
+        'geometry_sha256': os.path.join(root, 'targets', 'geometry.json'),
     }
     bad = []
     for k, p in files.items():
@@ -367,6 +458,48 @@ def verify_v3a5_artifact_lock(root, src_root,
                          'scripts/setup_v3a5_verifier.py'
                          % (lock['repo_commit'][:8], head[:8]))
     return lock
+
+
+def validate_run_protocol(lock, formal, seed=None, steps=None, grad_accum=None,
+                          variant=None, cache_name=None):
+    """-> effective science parameters; hard-fails on a protocol change (§18-§24).
+
+    A **formal** run (``limit 0``) takes seed / steps / grad_accum from the LOCK:
+    a different CLI value is an error rather than a silent override, because the
+    seed drives the image order, the state sequence and the shared init. A smoke
+    run may vary those three, but ``variant`` / ``cache_name`` always come from
+    the lock -- they select the actual reference set and Y0 cache, so changing
+    them would silently change the experiment even in a smoke.
+    """
+    for name, got, want in (('--variant', variant, lock['reference_variant']),
+                            ('--cache_name', cache_name, lock['cache_name'])):
+        if got is not None and got != want:
+            raise SystemExit('%s %r != the locked value %r -- the reference '
+                             'variant / Y0 cache are part of the protocol'
+                             % (name, got, want))
+    eff = dict(formal=bool(formal), variant=lock['reference_variant'],
+               cache_name=lock['cache_name'], seed=int(lock['seed']),
+               steps=int(lock['steps']),
+               grad_accum=int(lock['grad_accum_default']),
+               factor=int(lock['block_h4_factor']),
+               energy_threshold=float(lock['energy_threshold']),
+               energy_pctl=float(lock['energy_pctl']))
+    if formal:
+        bad = []
+        for name, got, want in (('--seed', seed, lock['seed']),
+                                ('--steps', steps, lock['steps']),
+                                ('--grad_accum', grad_accum,
+                                 lock['grad_accum_default'])):
+            if got is not None and int(got) != int(want):
+                bad.append('%s %s != locked %s' % (name, got, want))
+        if bad:
+            raise SystemExit('a formal V3-A.5 run must use the locked protocol: '
+                             + '; '.join(bad))
+    else:
+        for k, v in (('seed', seed), ('steps', steps), ('grad_accum', grad_accum)):
+            if v is not None:
+                eff[k] = int(v)
+    return eff
 
 
 def check_worktree(limit, head=None, dirty=None):

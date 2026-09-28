@@ -39,7 +39,7 @@ from v3a5_runtime import (ARM_MODE, ARMS, STATES, STATE_PROBS,    # noqa: E402
                           block_energy, check_worktree, energy_mask,
                           expand_gate, parameter_l1_drift, prepare_geometry,
                           sample_states, snapshot_, target_geometry,
-                          state_dict_sha, verifier_loss,
+                          state_dict_sha, validate_run_protocol, verifier_loss,
                           verify_v3a5_artifact_lock)
 
 SRC = '/root/data/experiments/v3a1_lolv2real'
@@ -119,14 +119,18 @@ def main():
     git_head, git_dirty, wt_warning = check_worktree(a.limit)
     lock = verify_v3a5_artifact_lock(a.root, a.src_root, v4_root=a.v4_root,
                                      v43_root=a.v43_root)
-    if a.steps != lock['steps'] and a.limit == 0:
-        raise SystemExit('--steps %d != locked steps %d (a formal run must use the '
-                         'locked schedule)' % (a.steps, lock['steps']))
-    if a.grad_accum != lock['grad_accum_default'] and a.limit == 0:
-        raise SystemExit('--grad_accum %d != locked %d'
-                         % (a.grad_accum, lock['grad_accum_default']))
+    # §18-§24: the lock is the source of truth for every science parameter
+    proto = validate_run_protocol(lock, formal=(a.limit == 0),
+                                  seed=a.seed, steps=a.steps,
+                                  grad_accum=a.grad_accum, variant=a.variant,
+                                  cache_name=a.cache_name)
+    a.seed = proto['seed']
+    a.steps = proto['steps']
+    a.grad_accum = proto['grad_accum']
+    a.variant = proto['variant']            # data selection comes from the lock
+    a.cache_name = proto['cache_name']
     mode = ARM_MODE[a.arm]
-    thr = float(lock['energy_threshold'])
+    thr = proto['energy_threshold']
 
     logf = open(os.path.join(a.root, 'logs', 'train_%s.log' % arm), 'w',
                 encoding='utf-8')
@@ -198,8 +202,7 @@ def main():
             g = geoms[mode]
             tgt = action_optimal_target(t['Y0'], t['H'], D, g)
             mask = energy_mask(block_energy(D, g), thr)
-        q_v = model(t['X'], t['Y0'], t['R'], target_shape=target_shape,
-                    strict_native=(mode == 'dense_block_h4'))
+        q_v = model(t['X'], t['Y0'], t['R'], geom=geoms[mode])
         q_full = expand_gate(q_v, geoms[mode])
         loss, gate_t, out_t = verifier_loss(q_v, tgt['q_grid'], mask, q_full,
                                             t['Y0'], t['H'], D)
@@ -215,8 +218,7 @@ def main():
             for state in STATES:
                 t = sample_tensors(dev_ds, i, state, a.device)
                 D, _sr = correction(proposal.proposal, t['Y0'], t['R'])
-                q_v = model(t['X'], t['Y0'], t['R'], target_shape=target_shape,
-                            strict_native=(mode == 'dense_block_h4'))
+                q_v = model(t['X'], t['Y0'], t['R'], geom=geoms[mode])
                 q_means.append(float(q_v.mean()))
                 step0_psnr.append(metrics(t['Y0'] + expand_gate(q_v, geoms[mode]) * D,
                                           t['H'])[0])

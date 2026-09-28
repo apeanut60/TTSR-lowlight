@@ -34,10 +34,11 @@ from v3a43_runtime import (build_level_chain, level_geometry_report)  # noqa: E4
 from v3a4_runtime import verify_v3a4_artifact_lock                # noqa: E402
 from v3a5_pipeline import (correction, load_proposal, load_rows,  # noqa: E402
                            make_dataset, sample_tensors)
-from v3a5_runtime import (ARMS, ARM_MODE, ENERGY_PCTL, MODES,     # noqa: E402
+from v3a5_runtime import (ARMS, ARM_MODE, ENERGY_PCTL, G64, MODES,  # noqa: E402
                           STATES, action_optimal_target, block_energy,
                           energy_threshold, geometry_report,
-                          pixel_energy, prepare_geometry, target_geometry,
+                          pixel_energy, prepare_geometry, STATE_PROBS,
+                          target_geometry,
                           verify_v3a5_artifact_lock)
 
 SRC = '/root/data/experiments/v3a1_lolv2real'
@@ -108,7 +109,11 @@ def main():
                     st.append(dict(mean=float(q.mean()), std=float(q.std()),
                                    frac0=float((q <= 0.01).float().mean()),
                                    frac1=float((q >= 0.99).float().mean())))
-                    mfrac.setdefault('%s|%s' % (m, state), []).append(cell)
+                    # the reported valid fraction must be the mask the arm will
+                    # really use: THIS mode's own block energies (§15/§16), not
+                    # the dense cell energy recycled for every mode
+                    mfrac.setdefault('%s|%s' % (m, state), []).append(
+                        block_energy(D, g))
             if (i + 1) % 25 == 0:
                 print('  pooled %d/%d images (%.0fs)'
                       % (i + 1, len(rows), time.time() - t0))
@@ -141,6 +146,41 @@ def main():
     target_stats = dict(geometry=geo, q_opt=tstats,
                         energy_threshold=thr, energy_pctl=ENERGY_PCTL,
                         pooled_images=len(rows), limit=a.limit)
+    # §28/§29: ONE geometry artifact that target, feature pooling and gate
+    # expansion all reference, derived from the frozen V3-A.4.3 nesting
+    nesting = json.load(open(os.path.join(a.v43_root, 'oracle', 'nesting.json'),
+                             encoding='utf-8'))
+    ref_level = nesting['levels'][str(G64)]
+    base_y = geo['dense_block_h4']['base_index_edges_y']
+    base_x = geo['dense_block_h4']['base_index_edges_x']
+    if geo['g64']['pixel_edges_y'] != [int(v) for v in ref_level['pixel_edges_y']] or \
+            geo['g64']['pixel_edges_x'] != [int(v) for v in ref_level['pixel_edges_x']]:
+        raise SystemExit('our G64 pixel edges differ from the frozen V3-A.4.3 '
+                         'nesting.json -- refusing to write a geometry artifact')
+    cell_y = int(base_y[1] - base_y[0])
+    for name, edges in (('y', geo['g64']['pixel_edges_y']),
+                        ('x', geo['g64']['pixel_edges_x'])):
+        cell = cell_y if name == 'y' else int(base_x[1] - base_x[0])
+        if any(int(v) % cell for v in edges):
+            raise SystemExit('G64 %s pixel edges are not on the base-cell lattice' % name)
+    geometry = dict(
+        native_feature_shape=geo['native_feature_shape'],
+        dense=dict(shape=geo['dense_block_h4']['shape'],
+                   base_index_edges_y=base_y,
+                   base_index_edges_x=base_x,
+                   pixel_edges_y=geo['dense_block_h4']['pixel_edges_y'],
+                   pixel_edges_x=geo['dense_block_h4']['pixel_edges_x']),
+        g64=dict(shape=geo['g64']['shape'],
+                 base_index_edges_y=geo['g64']['base_index_edges_y'],
+                 base_index_edges_x=geo['g64']['base_index_edges_x'],
+                 pixel_edges_y=geo['g64']['pixel_edges_y'],
+                 pixel_edges_x=geo['g64']['pixel_edges_x'],
+                 v3a43_nesting_level=str(G64),
+                 v3a43_pixel_edges_y=[int(v) for v in ref_level['pixel_edges_y']]),
+        source='V3-A.4.3 oracle/nesting.json',
+        note='target q*, feature pooling and gate expansion all use these edges')
+    json.dump(geometry, open(os.path.join(a.root, 'targets', 'geometry.json'), 'w',
+                             encoding='utf-8'), indent=2, sort_keys=True)
     json.dump(energy_stats, open(os.path.join(a.root, 'targets',
                                               'energy_stats.json'), 'w',
                                  encoding='utf-8'), indent=2, sort_keys=True)
@@ -151,6 +191,9 @@ def main():
     for m in MODES:
         print('  mask valid frac %-16s %s' % (m, {s: round(
             energy_stats['mask_valid_frac']['%s|%s' % (m, s)], 3) for s in STATES}))
+    print('geometry -> %s/targets/geometry.json (native %s, dense %s, g64 %s)'
+          % (a.root, geo['native_feature_shape'], geo['dense_block_h4']['shape'],
+             geo['g64']['shape']))
 
     v4lock = verify_v3a4_artifact_lock(a.v4_root, a.src_root)
     lock = dict(
@@ -166,11 +209,22 @@ def main():
         mismatch_dev_sha256=v4lock['mismatch_dev_sha256'],
         v3a43_summary_sha256=_sha256(os.path.join(a.v43_root, 'oracle', 'summary.json')),
         v3a43_nesting_sha256=_sha256(os.path.join(a.v43_root, 'oracle', 'nesting.json')),
+        v3a43_per_image_sha256=_sha256(os.path.join(a.v43_root, 'oracle',
+                                                    'per_image.csv')),
+        v3a43_root=a.v43_root,
+        v3a43_summary_path=os.path.join(a.v43_root, 'oracle', 'summary.json'),
+        v3a43_nesting_path=os.path.join(a.v43_root, 'oracle', 'nesting.json'),
+        v3a43_per_image_path=os.path.join(a.v43_root, 'oracle', 'per_image.csv'),
+        geometry_sha256=_sha256(os.path.join(a.root, 'targets', 'geometry.json')),
         energy_stats_sha256=_sha256(os.path.join(a.root, 'targets', 'energy_stats.json')),
         target_stats_sha256=_sha256(os.path.join(a.root, 'targets', 'target_stats.json')),
         states='+'.join(STATES), target_family='nested_blockwise_action_optimal',
+        reference_variant=a.variant, cache_name=a.cache_name,
+        state_probs=list(STATE_PROBS), block_h4_factor=4,
         arms=list(ARMS), modes=[ARM_MODE[x] for x in ARMS],
         g64_shape=geo['g64']['shape'], dense_shape=geo['dense_block_h4']['shape'],
+        g64_base_index_edges_y=geo['g64']['base_index_edges_y'],
+        g64_base_index_edges_x=geo['g64']['base_index_edges_x'],
         g64_edges_y=geo['g64']['pixel_edges_y'], g64_edges_x=geo['g64']['pixel_edges_x'],
         energy_threshold=thr, energy_pctl=ENERGY_PCTL,
         optimizer='adam', lr='1e-4 (0-2000) -> 5e-5 (2000-3000)', steps=3000,
@@ -195,6 +249,27 @@ def main():
           % (lock['v3a43_summary_sha256'][:12], lock['v3a43_nesting_sha256'][:12]))
     verify_v3a5_artifact_lock(a.root, a.src_root, v4_root=a.v4_root, v43_root=a.v43_root)
     print('  lock verified OK')
+    print()
+    print('══ §33 protocol summary ══')
+    print('  commit            : %s  (clean tree required for a formal run)'
+          % lock['repo_commit'][:12])
+    print('  proposal SHA      : %s' % lock['proposal_sha256'][:12])
+    print('  reference variant : %s' % lock['reference_variant'])
+    print('  Y0 cache          : %s' % lock['cache_name'])
+    print('  split SHA         : %s   mismatch train/dev: %s / %s'
+          % (lock['split_sha256'][:12], lock['mismatch_train_sha256'][:12],
+             lock['mismatch_dev_sha256'][:12]))
+    print('  A0 target         : Block_H4 %s (native H/4 support)'
+          % lock['dense_shape'])
+    print('  A1 target         : exact nested G64 %s' % lock['g64_shape'])
+    print('  feature pooling   : A0 native / A1 exact nested block mean'
+          ' (no adaptive pooling, no interpolation)')
+    print('  energy threshold  : %.6e (p%.0f, resolutions share it)'
+          % (lock['energy_threshold'], lock['energy_pctl']))
+    print('  seed / steps      : %d / %d   grad_accum %d   states %s (p=%s)'
+          % (lock['seed'], lock['steps'], lock['grad_accum_default'],
+             lock['states'], lock['state_probs']))
+    print('  official Test     : disabled')
 
 
 if __name__ == '__main__':

@@ -37,7 +37,8 @@ from v3a5_runtime import (ARM_MODE, ARMS, STATES, action_optimal_target,  # noqa
                           block_energy, check_worktree, energy_mask,
                           expand_gate, gate_metrics, per_image_qmean_corr,
                           prepare_geometry, recovery, target_geometry,
-                          verdict_5a, verify_v3a5_artifact_lock)
+                          validate_run_protocol, verdict_5a,
+                          verify_v3a5_artifact_lock)
 
 SRC = '/root/data/experiments/v3a1_lolv2real'
 V4 = '/root/data/experiments/v3a4_lolv2real'
@@ -46,9 +47,8 @@ R1_CK = 'R1_v2stable_naive_s42/checkpoint_03000.pt'
 ORACLE_COLS = ('R1', 'G64', 'Block_H4')
 
 
-def load_oracle_table(v43_root):
+def load_oracle_table(path):
     """-> {(split, state, sample_id): row} from the frozen V3-A.4.3 table."""
-    path = os.path.join(v43_root, 'oracle', 'per_image.csv')
     rows = list(csv.DictReader(open(path, encoding='utf-8')))
     table, means = {}, {}
     for r in rows:
@@ -98,6 +98,10 @@ def main():
     git_head, git_dirty, wt_warning = check_worktree(a.limit)
     lock = verify_v3a5_artifact_lock(a.root, a.src_root, v4_root=a.v4_root,
                                      v43_root=a.v43_root)
+    proto = validate_run_protocol(lock, formal=(a.limit == 0), variant=a.variant,
+                                  cache_name=a.cache_name)
+    a.variant = proto['variant']
+    a.cache_name = proto['cache_name']
     diag_dir = os.path.join(a.root, 'diagnostics')
     os.makedirs(diag_dir, exist_ok=True)
     logf = open(os.path.join(a.root, 'logs', 'eval_dev.log'), 'w', encoding='utf-8')
@@ -114,9 +118,11 @@ def main():
     if wt_warning:
         log('  git WARNING: %s' % wt_warning)
 
-    oracle, oracle_means = load_oracle_table(a.v43_root)
-    cross_check_oracle(oracle_means,
-                       os.path.join(a.v43_root, 'oracle', 'summary.json'))
+    # §25/§26: the eval anchor is the LOCKED V3-A.4.3 table, not whatever
+    # --v43_root points at
+    anchor = lock['v3a43_per_image_path']
+    oracle, oracle_means = load_oracle_table(anchor)
+    cross_check_oracle(oracle_means, lock['v3a43_summary_path'])
     log('  oracle anchor: V3-A.4.3 per_image.csv cross-checked OK')
 
     ns = option_parser.parse_args([])
@@ -183,8 +189,7 @@ def main():
                     for arm in ARMS:
                         mode = ARM_MODE[arm]
                         q_v = arms[arm](t['X'], t['Y0'], t['R'],
-                                        target_shape=geoms[mode]['shape'],
-                                        strict_native=(mode == 'dense_block_h4'))
+                                        geom=geoms[mode])
                         q_full = expand_gate(q_v, geoms[mode])
                         rec[arm] = metrics(t['Y0'] + q_full * D, t['H'])[0]
                         tgt = action_optimal_target(t['Y0'], t['H'], D, geoms[mode])
@@ -250,8 +255,8 @@ def main():
                                  limit=a.limit, states=list(STATES), arms=list(ARMS),
                                  energy_threshold=thr,
                                  checkpoints=used,
-                                 oracle_anchor=os.path.join(a.v43_root, 'oracle',
-                                                            'per_image.csv'),
+                                 oracle_anchor=anchor,
+                                 oracle_anchor_source='artifact_lock.json',
                                  git_head=git_head, git_dirty_count=len(git_dirty)),
                   splits=out, report=report),
               open(os.path.join(diag_dir, 'summary.json'), 'w', encoding='utf-8'),

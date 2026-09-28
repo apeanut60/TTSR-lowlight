@@ -34,7 +34,7 @@ from v3a5_pipeline import (correction, load_proposal, load_rows,  # noqa: E402
 from v3a5_runtime import (MODES, STATES, action_optimal_target,   # noqa: E402
                           bit_equal, expand_gate, prepare_geometry,
                           state_dict_sha, target_geometry,
-                          verify_v3a5_artifact_lock)
+                          validate_run_protocol, verify_v3a5_artifact_lock)
 
 SRC = '/root/data/experiments/v3a1_lolv2real'
 V4 = '/root/data/experiments/v3a4_lolv2real'
@@ -59,6 +59,8 @@ def main():
 
     lock = verify_v3a5_artifact_lock(a.root, a.src_root, v4_root=a.v4_root,
                                      v43_root=a.v43_root)
+    validate_run_protocol(lock, formal=(a.limit == 0), variant=a.variant,
+                          cache_name=a.cache_name)
     checks = []
     print('V3-A.5 §31 acceptance checks')
 
@@ -84,15 +86,26 @@ def main():
         ok('target algebra %s' % mode, shape=list(geom['shape']))
 
     # ── 2. G64 reproduces the frozen V3-A.4.3 oracle ────────────────────────
-    nesting = json.load(open(os.path.join(a.v43_root, 'oracle', 'nesting.json'),
-                             encoding='utf-8'))
+    nesting = json.load(open(lock['v3a43_nesting_path'], encoding='utf-8'))
     geom64 = target_geometry(400, 600, 'g64')
-    if [int(v) for v in geom64['edges'][0]] != \
-            [int(v) for v in nesting['levels']['64']['pixel_edges_y']] or \
-            [int(v) for v in geom64['edges'][1]] != \
-            [int(v) for v in nesting['levels']['64']['pixel_edges_x']]:
+    ref_y = [int(v) for v in nesting['levels']['64']['pixel_edges_y']]
+    ref_x = [int(v) for v in nesting['levels']['64']['pixel_edges_x']]
+    if [int(v) for v in geom64['edges'][0]] != ref_y or \
+            [int(v) for v in geom64['edges'][1]] != ref_x:
         raise SystemExit('G64 pixel edges differ from the frozen nesting.json')
-    ok('g64 edges == V3-A.4.3 nesting.json', nby=geom64['shape'][0])
+    # the FEATURE-pooling partition must be the same base-cell grouping, i.e.
+    # pixel_edges / cell_size on the native lattice (§8)
+    base = target_geometry(400, 600, 'dense_block_h4')
+    cell_y = int(base['edges'][0][1] - base['edges'][0][0])
+    cell_x = int(base['edges'][1][1] - base['edges'][1][0])
+    if [int(v) // cell_y for v in ref_y] != [int(v) for v in
+                                             geom64['base_index_edges'][0]] or \
+            [int(v) // cell_x for v in ref_x] != [int(v) for v in
+                                                  geom64['base_index_edges'][1]]:
+        raise SystemExit('feature-pooling base-index edges differ from the '
+                         'V3-A.4.3 G64 partition')
+    ok('g64 target+pooling edges == V3-A.4.3 nesting.json',
+       nby=geom64['shape'][0])
 
     ns = option_parser.parse_args([])
     ns.dataset_dir = a.data_dir
@@ -157,8 +170,7 @@ def main():
         gm = prepare_geometry(target_geometry(400, 600, mode), a.device)
         with torch.no_grad():
             D, _sr = correction(proposal.proposal, t['Y0'], t['R'])
-            q = m(t['X'], t['Y0'], t['R'], target_shape=gm['shape'],
-                  strict_native=(mode == 'dense_block_h4'))
+            q = m(t['X'], t['Y0'], t['R'], geom=gm)
             step0[mode] = dict(q_mean=float(q.mean()), q_std=float(q.std()),
                                psnr=metrics(t['Y0'] + expand_gate(q, gm) * D,
                                             t['H'])[0])
