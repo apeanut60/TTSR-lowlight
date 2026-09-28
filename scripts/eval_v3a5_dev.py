@@ -76,6 +76,23 @@ def cross_check_oracle(means, summary_path):
                          '-- the oracle anchor is inconsistent' % ', '.join(bad))
 
 
+def nanmean_dict(rows):
+    """Average per-image metric dicts, skipping undefined values (§19).
+
+    A handful of images have an undefined correlation because the G64 oracle's
+    optimal gate is constant (q* == 1 everywhere -> AO64 == R1). A plain mean
+    would turn that into NaN for the whole state; the count of finite values is
+    reported alongside so the reader can see how many images support the number.
+    """
+    out = {}
+    for k in sorted(rows[0]):
+        v = np.asarray([r[k] for r in rows], dtype=np.float64)
+        finite = np.isfinite(v)
+        out[k] = float(v[finite].mean()) if finite.any() else float('nan')
+        out[k + '_n_valid'] = int(finite.sum())
+    return out
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument('--root', default='/root/data/experiments/v3a5_g64_verifier')
@@ -217,8 +234,10 @@ def main():
                 psnr=e,
                 recovery64={arm: recovery(e[arm], e['R1'], e['AO64']) for arm in ARMS},
                 recovery64_by_state_denominator=bool(e['AO64'] - e['R1'] > 0),
-                gate={arm: {k: float(np.mean([m[k] for m in gm[arm][state]]))
-                            for k in gm[arm][state][0]} for arm in ARMS},
+                recovery64_cells_with_zero_denominator=sum(
+                    1 for r in per_image if r['split'] == tag and r['state'] == state
+                    and r['recovery64_%s' % ARMS[0]] is None),
+                gate={arm: nanmean_dict(gm[arm][state]) for arm in ARMS},
                 per_image_qmean_corr={arm: per_image_qmean_corr(
                     qv[arm][state], qo[arm][state]) for arm in ARMS})
             for arm in ARMS:
