@@ -43,6 +43,9 @@
 | §30 | V3-A.5A：G64 vs Dense-BlockH4 verifier | ✅ **Case C**：A1≈A0 且都差；瓶颈是 **可学性**，非分辨率 |
 | §31 | V3-A 系列合并结论 | ⚠️ 被 §32 补充 |
 | §32 | V3-A.5C：tiny16 q* overfit | ✅ **C0_fail + C1_fail** → 非 output-loss 冲突；转 RF/表示 |
+| §33 | V3-A.5D0：evidence audit（零训练） | ✅ **PASS（仅准则 C）**；A/B 未过；弱 decile → 人工 D1，不自动训 |
+| §34 | V3-A.5D1：narrow evidence tiny overfit | ✅ **D1_null**；A1≈A0（略差）→ 关闭 evidence，进 D2 |
+| §35 | V3-A.5D2：MultiScale RF tiny overfit | ✅ **D2_strong_success**；A1 mCorr 0.98 → RF 是瓶颈；下一轮 D2-full |
 
 ## 0.1 摘要（截至 §17；V3-A 系列见 §31）
 
@@ -1838,3 +1841,73 @@ C0 因 `mMAE>0.20` 明确 hard-fail。C1 相对 C0：MAE/corr 改善 ≈ **0**�
    不扫 loss weight、不进 5B。
 
 Tiny16 本身合格（mean G64 headroom +0.54 dB；三 state 均有 G64>G1）。
+
+---
+
+## 33. V3-A.5D0：Matcher/Proposal Evidence Audit（零训练）
+
+> 完整报告：`/root/data/experiments/v3a5d_evidence/findings_v3a5d0.md`  
+> 计划：`V3A5D_COMPLETE_EXECUTION_PLAN.md` Stage 0 + D0  
+> 日期：2026-09-29；train575+dev64 × 3 states；**未训** D1/D2/D3；未跑 Test
+
+### 33.1 判定：**PASS（仅准则 C）** → 下一轮人工 D1
+
+| 准则 | 结果 |
+|---|---|
+| A：`|Spearman|≥0.30` 且 train/dev 同向 | ❌ 全体 `|ρ|<0.20`（最大 ~0.15） |
+| B：polarized ROC-AUC≥0.65 且 ≥2/3 states | ❌ 全体 AUC`<0.60` |
+| C：decile 稳定单调且同向 | ✅ `sim_max`(+)、`margin`(−)、`f0_minus_t`(−) |
+| 强成功 (`|ρ|≥0.45` 或 AUC≥0.75) | ❌ |
+| 明确失败（关 evidence 路线 → 只做 D2） | ❌（因有稳定 decile） |
+
+T 等价硬 invariant：`T/gate/delta/D/sr` max_abs = 0（相对冻结 R1）。
+
+### 33.2 含义
+
+1. Match/proposal evidence **不是** q*_G64 的强线性预测器；H1 仅获 **弱支持**（decile）。
+2. `pmax` / `1−entropy` / `disp_var` 高度冗余；D1 最多塞 4–6 路，优先 `sim_max` + `f0_minus_t` + `gate_v2`。
+3. 本轮 **STOP**：不自动训；通过后由人工启动 D1（EvidenceFusion 零初始化）。
+
+---
+
+## 34. V3-A.5D1：Narrow Evidence Tiny Overfit
+
+> 完整报告：`/root/data/experiments/v3a5d1_tiny_evidence/findings_v3a5d1.md`  
+> 日期：2026-09-29；同 V3A5C tiny16×48；gate-only；**未跑** D1-full / Test
+
+### 34.1 判定：**D1_null_close_evidence** → D2
+
+| arm @20k | masked_MAE | masked_corr | decision_acc |
+|---|---:|---:|---:|
+| A0_control | 0.259 | 0.574 | 0.830 |
+| A1 + `{sim_max, f0_minus_t, gate_v2}` | 0.269 | 0.548 | 0.822 |
+
+`Δcorr=−0.026`，`ΔMAE=+0.010`，`acc<0.90` —— 成功线全不过；A1 略差于 A0。
+
+### 34.2 含义
+
+1. D0 弱 decile **不能**换成 tiny overfit 增益。  
+2. **关闭** narrow evidence 路线（不跑 D1-full）。  
+3. 下一轮只测 RF：`V3-A.5D2` MultiScale context，不加 evidence。
+
+---
+
+## 35. V3-A.5D2：RF / MultiScale Context Tiny Overfit
+
+> 完整报告：`/root/data/experiments/v3a5d2_rf_tiny/findings_v3a5d2.md`  
+> 日期：2026-09-29；同 tiny16×48；gate-only；**未跑** D2-full / D3 / Test
+
+### 35.1 判定：**D2_strong_success** → 下一轮人工 D2-full
+
+| arm @20k | masked_MAE | masked_corr | decision_acc | spatial_corr |
+|---|---:|---:|---:|---:|
+| A0_control | 0.259 | 0.574 | 0.830 | 0.559 |
+| A1 MultiScale | **0.023** | **0.975** | **0.977** | **0.932** |
+
+`Δcorr=+0.40`，`ΔMAE=−0.24`，`acc=0.98` —— 成功线与强成功线全过。A1 约 5k 步已过强成功。
+
+### 35.2 含义
+
+1. **RF/context 是当前 verifier 学不动 q* 的主因**（对比 D1 evidence 无效）。  
+2. D3（evidence+MS）不跑（D1 已关闭）。  
+3. 下一轮：**D2-full**（train575→dev64 泛化）；本轮 STOP。
