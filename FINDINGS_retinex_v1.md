@@ -1,10 +1,10 @@
 # Retinexformer V1 —— 改动、验证与结论
 
-> 日期：2026-09-23/24
-> 范围：新增 Retinexformer 主干 + H/4 单点纹理适配器，R0/R1/R2/R3 四组配对，
-> 以及后续的配方修复、子集、适配器、解冻 decoder 等六轮验证，
-> 最后是 V2「输出端局部参考细化」的两臂 × 3 种子筛选（§17）
+> 日期：2026-09-23 → 2026-09-28
+> 范围：Retinexformer 主干、参考分支诊断、V2 输出端局部细化，
+> 以及 V3-A / V3-A.1–A.5A 的 hallucination-aware verifier 系列
 > 前置文档：`FINDINGS_reference_branch.md`（参考分支的逐组件诊断）
+> 各轮完整报告：`/root/data/experiments/{v3a*,retinex_v*}/findings_*.md`
 > 所有数字均为本仓库实测
 
 ---
@@ -33,9 +33,21 @@
 | §20 | V2.1 重评：修复后信号仍在，但幅度变小（+0.097 / +0.106） | ✅ 有效，单种子新协议 |
 | §21 | 跨数据集冻结权重测试（LOL-v2-real Test）：+0.294 / +0.301，但**内容项不显著** | ✅ 有效；`external_reused`，非独立验证 |
 | §22 | 残差频率分解诊断：**该模块是低频照明修正器，不是纹理迁移器** | ✅ 有效；修正了 §17 的机制叙述 |
-| §23 | V3-A（LOLv2-real, hallucination-aware）：**Fail**，两臂均低于 Base 约 1.1 dB | ✅ 有效；oracle 指向 proposal 是瓶颈 |
+| §23 | V3-A（hallucination-aware）：两臂低于 Base ~1.1 dB | ⚠️ **Fail 成立**；但"oracle ⇒ proposal 瓶颈"已被 §25 **反转** |
+| §24 | V3-A.1：V2-stable proposal + Low-Anchor Verifier | ✅ Phase A 过、Phase B 落 **C（过度拒绝）**；部分诊断被 §25 修正 |
+| §25 | Bug 审计（2026-09-27）：漏乘 `g_v2` 等 | ✅ **读 §23/§24 前必看**；H/8 GT-gate 实为 +1.56 |
+| §26 | V3-A.2：冻结 proposal + action-optimal verifier | ✅ **C 分支**：headroom +0.38，learned 只捕获 17% |
+| §27 | V3-A.3：Action-Conditioned（C0 vs C1） | ✅ C1≡C0；根因是 **action 尺度**（贡献 ~3%） |
+| §28 | V3-A.4：归一化 action + 干净协议 | ✅ 尺度修好后仍 ≈C0；**action 冗余**，非淹没 |
+| §29 | V3-A.4.1–4.3：gate 分辨率 oracle | ✅ **G64（~8×10 px）足够**；dense H/4 额外仅 ~0.02 dB |
+| §30 | V3-A.5A：G64 vs Dense-BlockH4 verifier | ✅ **Case C**：A1≈A0 且都差；瓶颈是 **可学性**，非分辨率 |
+| §31 | V3-A 系列合并结论 | ⚠️ 被 §32 补充 |
+| §32 | V3-A.5C：tiny16 q* overfit | ✅ **C0_fail + C1_fail** → 非 output-loss 冲突；转 RF/表示 |
 
-## 0.1 摘要（截至 §17）
+## 0.1 摘要（截至 §17；V3-A 系列见 §31）
+
+> V2 及更早的工程/科学摘要仍如下表。
+> **V3-A → V3-A.5A 的合并结论见 §31**；读 §23 前先看 §25（审计反转了 oracle 诊断）。
 
 **工程侧**
 
@@ -1412,6 +1424,11 @@ Nano − N0  =  (mismatch − N0)  +  (correct − mismatch)
 > 完整报告：`/root/data/experiments/v3a_lolv2real/findings_v3a.md`
 > 计划：`/root/projects/V3A_LOLV2_REAL_HALLUCINATION_AWARE_PLAN.md`
 > 执行计划（含前提修正）：`/root/projects/V3A_LOLV2REAL_EXECUTION_PLAN.md`
+>
+> ⚠️ **读本节前先看 §25。** Fail（两臂低于 Base ~1.1 dB）本身成立，
+> 但 23.3 的"oracle-gate ⇒ proposal 是瓶颈"已被审计**反转**：
+> 正确 GT-gate 是 **+1.5553**（旧值 −0.8022 漏乘了 `g_v2`）。
+> 另：R1 并非真正 naive（与 R2 共用带 trust/reject 的 `state_losses`）。
 
 ### 23.1 结果：按计划 §11 判定为 **Fail**
 
@@ -1457,19 +1474,367 @@ base 身份不影响该比较；且使结果与 §21 的外部评测直接可比
 - `corr(预测 gate, q_star) = 0.345`，说明"有用性"信号**是可学的**；
 - bypass 精确回退。
 
-**但 oracle-gate 诊断指出瓶颈在 proposal：**把 gate 换成 GT 导出的 q_star，也只有 19.7662，
-**仍比 Base 低 0.80 dB**。即：**给完美 gate 也赢不过 Base** → 问题不在 verifier，而在
-H/8 低频 proposal 产生的修正量本身。
+**当时的 oracle-gate 诊断（已作废，见 §25）：**旧写法 `Y0 + q_star*delta` 得到 19.7662（−0.80），
+据此断定"给完美 gate 也赢不过 Base ⇒ proposal 是瓶颈"。
+**正确写法 `Y0 + g_v2*q_star*delta` 实为 +1.5553**——结论反转：H/8 proposal 天花板高于 V2。
 
-失败模式：`R2 vs Base` 有 **37/100 张变动超过 5 dB**（最好 +11.74，最差 −15.69）——
-是整幅图的全局电平被大改，不是精细修正。与 §22 的诊断一致（该家族修正 99% 是低频），
-只是这次**尺度失控**：V2 同类修正 +0.374 / 最差 −1.24，V3-A −1.109 / 最差 −15.7。
+失败模式本身仍成立：`R2 vs Base` 有 **37/100 张变动超过 5 dB**（最好 +11.74，最差 −15.69）——
+整幅图全局电平被大改。与 §22 一致（该家族修正 99% 是低频），只是这次**尺度失控**；
+§24 的前置审计进一步归因到 **data1-base 在 LOL Train/Test 上难度错位 4.8 dB**。
 
-### 23.4 下一步
+### 23.4 下一步（⚠️ 已被 §24–§30 取代；保留作当时推理）
 
-按计划 Fail 分支：归档，**不盲扫 LR/width**。基于证据：
+按当时计划 Fail 分支：归档，**不盲扫 LR/width**。当时建议回到 V2 架构做增量、给 proposal 加尺度约束。
+实际后续：§24 换 LOL base + V2-stable proposal；§25 发现 H/8 天花板其实更高；
+§26–§28 在 V2 proposal 上改 verifier，均未过；§29–§30 证明 G64 分辨率够，但 learned gate 仍学不成决策。
 
-1. 先给低频 proposal 加**尺度约束**（delta 零均值 / 每图幅度上限 / 在 H 分辨率输出）再谈 verifier；
-2. 回到 **V2 架构**作基线（同一 base、同一测试集 +0.374），说明"低频修正"本身可做对，
-   V3-A 丢掉的正是让 V2 稳定的那部分（full-res 输出头 + smooth/color 先验 + data1 训练分布）；
-3. 拒绝机制若要继续，应在 V2 上做**增量**，而不是另起一个 H/8 的弱 proposal。
+---
+
+## 24. V3-A.1：V2-stable proposal + Low-Anchor Verifier（方案 A：LOL base）
+
+> 完整报告：`/root/data/experiments/v3a1_lolv2real/findings_v3a1.md`
+> 前置阻断：`findings_v3a1_prerequisite.md`（data1-base 在 LOL Train/Test 难度错位 4.8 dB）
+> 计划：`/root/projects/plans/V3A1_STRUCT_FIX_EXECUTION_PLAN.md`
+> 日期：2026-09-25；主指标 RGB-PSNR / SSIM(Y)，Test 100 张，Nano-v2 参考
+
+### 24.1 前置：为什么必须换 LOL base
+
+同一冻结 data1-N0 在 LOL Train 只有 **15.74**、在 Test 有 **20.57**（差 4.83 dB）。
+refiner 在更难的 Train 上学大修正，评测时过冲——这同时解释了 §23 的"37/100 张 >5 dB"。
+方案 A：改用 LOL 自训 base（ep25，Test 18.08），train/test 难度恢复匹配。
+
+### 24.2 结果：Phase A 过，Phase B 落 **C（verifier 过度拒绝）**
+
+| 条件 | PSNR | Δ vs Base |
+|---|---:|---:|
+| Base（LOL ep25） | 18.0781 | — |
+| **R1-correct** | **18.2260** | **+0.1479** |
+| R1-dark（对比度压缩 ×0.5，见 §25/§27） | 17.6857 | −0.3925 |
+| R2-correct | 18.0680 | −0.0101 |
+| R2-dark | 17.9438 | −0.1343 |
+| R2-bypass / R2-qv0 | 18.0781 | **+0.0000** |
+| R2-qv1（只走 proposal） | 18.2960 | +0.2178 |
+
+```text
+Delta_scheme  R2 − Base           = −0.0101
+Delta_verify  R2 − R1             = −0.1580   （门槛 >= −0.05）❌
+safety (dark) harm_R2 − harm_R1   = +0.2583   （门槛 >= +0.20）✓
+corr(q_v, q_star)                 = −0.245    （负相关；per-image mean）
+q_v: correct 0.300 vs mismatch 0.282
+```
+
+**可独立确认**：`R2-qv1 = +0.2178` 而 learned `R2-correct = −0.010` →
+learned verifier **抑制了一个本身有正增益的 proposal**。
+gate safety（qv0 / bypass 精确回退）成立。
+
+### 24.3 机制与下一步
+
+`L_safe = mean((1−q_star)·|Ŷ−Y0|)` 在 `q_star≈0.55` 时退化成全局抑制；
+verifier 学成"总闸门"而非判别器。LOL 上 mismatch/corrupt **本来就不害**（+0.004 / +0.124），
+真正有害的是曝光错与噪声——计划把 mismatch 当安全主指标在此无余量。
+
+下一步（计划 C）：只动 verifier 监督/标定，不动 proposal → 引出 §26 的 action-optimal 目标。
+
+---
+
+## 25. Bug 审计（2026-09-27）：哪些 §23/§24 结论要改
+
+> 完整报告：`/root/data/experiments/AUDIT_2026-09-27.md`
+> 机读：`audit_recompute.json`；脚本：`scripts/audit_recompute_affected.py`
+
+### 25.1 头条：H/8 proposal 不是该废弃的瓶颈
+
+旧 `R2-oracle-gate = −0.8022` 用了 `Y0 + q_star*delta`（**漏乘 `g_v2`**）。
+同一 checkpoint 重算：
+
+| 构造 | Δ vs Base |
+|---|---:|
+| `g_v2 · delta`（模型实际输出） | −1.1090 |
+| `g_v2 · 0.25 · delta`（常数衰减） | **+0.8474** |
+| GT-gate（旧，漏 g_v2） | −0.8022（已发布，作废） |
+| **GT-gate（正确）** | **+1.5553** |
+
+→ H/8 天花板 **+1.56**，高于 V2 action-optimal（+0.524）约 1.0 dB。
+"废弃 H/8、改用 V2 proposal"（§24 当时的选择）建立在算错的诊断上；
+但 V3-A.2/A.3 已在较弱 proposal 上继续，这条路径的实验结果本身仍有效。
+
+### 25.2 逐条状态（摘要）
+
+| 结论 | 状态 |
+|---|---|
+| §17/§20/§21/§22（V2 路径） | ✅ 不受影响 |
+| §23 Fail（R2 −1.11）与"37/100 >5 dB" | ✅ 对该模型成立 |
+| §23「oracle ⇒ proposal 瓶颈」 | ❌ **反转** → +1.5553 |
+| §23「R1 是 naive」 | ❌ R1 与 R2 共用 trust/reject `state_losses` |
+| §24「learned 抑制有增益 proposal」（R2-qv1 vs R2-correct） | ✅ 成立 |
+| §24「R1-dark = −0.3925」 | ⚠️ 数字真、**标签错**：是对比度压缩，非曝光（§27 已修） |
+| V3-A.2 `q_opt` headroom +0.3765 | ✅（该处 D 已含 g_v2） |
+| V3-A.2 旧 usefulness +0.0592 | ❌ 多乘一次 g_v2；正确 **+0.1482 ≈ R1**（旧 target 零 headroom） |
+
+```text
+proposal 天花板（同一 Base / Test 100）：
+  V2-stable (R1) ActionOptimal   +0.5243
+  V3-A H/8 GT-gate（修正后）     +1.5553
+gate 学出来：
+  V3-A H/8 + learned             −1.1090
+  V2 + learned（V3-A.2）         −0.0101
+```
+
+**两条路都没走通"学出 gate"，但 H/8 天花板明显更高。**
+
+---
+
+## 26. V3-A.2：冻结 proposal + action-optimal verifier
+
+> 完整报告：`/root/data/experiments/v3a2_lolv2real/findings_v3a2.md`
+> 计划：`/root/projects/plans/V3A2_ACTION_OPTIMAL_VERIFIER_PLAN.md`
+> Base = LOL ep25；Proposal = V3-A.1 R1（冻结）；日期：2026-09-25
+
+### 26.1 Go/No-Go：新目标有 headroom
+
+修正漏乘后，旧 usefulness gate 只剩 +0.059（≈无信息）；
+**ActionOptimalGate = 18.6025（+0.5243）**，相对 R1 headroom **+0.3765** → GO。
+
+### 26.2 正式对照：落 **C 分支**
+
+| 条件 | PSNR | Δ vs Base |
+|---|---:|---:|
+| R1-correct | 18.2260 | +0.1479 |
+| R1-dark | 17.6857 | −0.3925 |
+| **V3A2-correct** | **18.2133** | **+0.1351** |
+| **V3A2-dark** | **17.7493** | **−0.3288** |
+| V3A2-q0 / q1 | 精确 == Base / R1 | ✅ gate safety |
+
+```text
+correct preservation : −0.0127（门槛 >= −0.03）✅
+dark safety          : +0.0636（门槛 >= +0.20）❌
+实际捕获             : 0.0636 / 0.3765 = 17%
+训练末 q_v c/d/n     : 0.894 / 0.860 / 0.894   ← 几乎不区分
+q_opt c/d/n          : 0.694 / 0.372 / 0.665   ← 目标区分度大
+pixel corr(q_v,q_opt): 0.253
+```
+
+**目标对、verifier 学不动。** noise-gaussian 在 LOL 上实测有益（+0.12），
+不能当"需拒绝"状态；本轮真正验证的只有拒绝坏曝光，方向对、幅度远不够。
+
+下一步：改 verifier **输入/容量**（加入 proposal 的 `D=g_v2·delta`）→ §27。
+
+---
+
+## 27. V3-A.3：Action-Conditioned Verifier（C0 vs C1）
+
+> 完整报告：`/root/data/experiments/v3a3_lolv2real/findings_v3a3.md`
+> 计划：`/root/projects/plans/V3A3_ACTION_CONDITIONED_VERIFIER_PLAN.md`
+> 日期：2026-09-27；**dev64 判定未过 → 不跑 official Test**
+
+### 27.1 结论：C1 ≡ C0，但根因是尺度，不是"action 无用"
+
+唯一差别：C1 多 4 个 action 通道（D4/E4）。训练末步 corr / mae / q_v / 逐状态 PSNR **全部一致**。
+
+| 通道 | mean\|x\| | 对前激活贡献（估） |
+|---|---:|---:|
+| encoder 特征（160 ch） | ~0.1–0.5 | ~1.28e-02（~97%） |
+| **D4 / E4（4 ch）** | **2.3e-2 / 8.9e-4** | **~3.8e-4（~3%）** |
+
+action 确在学习（init 0 → max\|w\|=5e-2），但输入小 1–3 个数量级，结构上无法被使用。
+计划第一版禁止 normalize——本轮**正确地排除了"原始尺度可用"**。
+
+### 27.2 其它确立
+
+- dark 语义已修：旧 `rescale(0.5)` 改名 `contrast_compress`；新增真 `exposure_gain`
+- corruption audit：训练状态 = `correct + true_dark_g0.5 + mismatch`
+- verifier 学到了**排序**（gap_pred ≈ gap_gt），但绝对水平整体偏高
+- **dev64 对 base/proposal 是 in-sample**（Base 19.70 vs Test 18.08）；harmful 判定会跨子集翻符号
+
+下一步：归一化 action 到 encoder 同量级 → §28。
+
+---
+
+## 28. V3-A.4：Clean Protocol + Normalized Action
+
+> 完整报告：`/root/data/experiments/v3a4_lolv2real/findings_v3a4.md`
+> 计划：`/root/projects/plans/V3A4_CLEAN_NORMALIZED_ACTION_PLAN.md`
+> 日期：2026-09-27；dev64 step 3000；§18 未过 → **未跑 official Test**
+
+### 28.1 结论：尺度修好了，指标仍不动 → action **冗余**
+
+```text
+action 贡献比：C1-raw 0.001 → C2-norm 0.034（×34）
+corr_global(C2) − corr_global(C0) = −0.0001   （需 >= +0.10）✗
+三臂 correct vs R1：约 −0.06 dB（都掉，与 action 无关）
+dark / mismatch 相对 R1：+0.10 / +0.30（C0 已有，与 action 无关）
+```
+
+**C0（完全无 action）已把 gate 学得很有判别力**（correct q_v 0.679 vs dark 0.298）。
+`D` 基本是 FR 的函数，再喂回去无新信息。因此 V3-A.3 的 C1≈C0 **部分**是尺度问题，
+**主导原因是冗余**。继续在 action 表征上加码优先级下调。
+
+### 28.2 协议侧收获
+
+严格 proposal 加载、结构性冻结、train/dev mismatch 隔离、train-only RMS、
+8-SHA artifact lock、global 聚合指标、action 前后向连通性——后续诊断复用此协议。
+
+下一步：查 correct −0.06 与 q_opt 稳定性 → §29 的 target/resolution audit。
+
+---
+
+## 29. V3-A.4.1–4.3：Gate 分辨率 oracle 系列（只读，无训练）
+
+> 4.1：`/root/data/experiments/v3a41_target_audit_v2/findings_v3a41.md`（2026-09-27）
+> 4.2：`/root/data/experiments/v3a42_blockwise_oracle/findings_v3a42.md`（2026-09-28）
+> 4.3：`/root/data/experiments/v3a43_fine_resolution/findings_v3a43.md`（2026-09-28）
+
+### 29.1 V3-A.4.1：target 稳定；global 能吃约 62%
+
+- 十个 mode/split 的 `gap_gt` 全在 **+0.123 ~ +0.164**；历史 train `−0.018` 是 **1.2 SE 采样噪声** → **不改 q_opt**
+- proposal full vs crop：cosine **0.99**，几乎不受 crop 影响
+- Global-AO capture vs Spatial-AO：**0.52 ~ 0.74**（均值 ≈0.62）→ 灰区，需 blockwise sweep
+
+→ V3-A.4 的 correct −0.06 **不能**归因于 target 不稳或 context shift。
+
+### 29.2 V3-A.4.2：G16（~25 px）才能到 ~85–92%
+
+以同族 `Block_H4`（4×4 px）为分母的 nested ladder：
+
+| 级别 | 典型块 | dev cap（c/d/m） |
+|---|---|---|
+| G1（global） | 整图 | 0.51 / 0.73 / 0.52 |
+| G4 | ~100 px | 0.75 / 0.85 / 0.73 |
+| **G16** | **~25 px** | **0.87 / 0.92 / 0.89** |
+| Block_H4 | 4 px | 1.00（定义） |
+
+G16→Block_H4 仍有平均 **0.06 dB**（≥0.05 工程线）→ **Case C：spatial detail 真的重要**；
+但"4×4/8×8 就够"不成立。暗参考更早饱和。
+
+### 29.3 V3-A.4.3：G64（~8×10 px）足够；dense 额外无结构必要
+
+| 级别 | blocks | 块约 | dev cap64 |
+|---|---|---|---|
+| G32 | 32×32 | 12–20 px | 0.909 / 0.950 / 0.933（不够） |
+| **G64** | **64×64** | **4–12 px** | **0.950 / 0.974 / 0.967**（六格全 ≥0.95） |
+| Block_H4 | 100×150 | 4×4 px | 1.00 |
+
+`G64→Block_H4` 最大 0.030 dB、平均 ~0.019 → **低于 0.05 结构线**。
+→ **V3-A.5 优先 `global + G64 regional gate`；不要预测 H/4 dense。**
+边界：这是 oracle 曲线，不是"G64 verifier 能训出来"。
+
+---
+
+## 30. V3-A.5A：G64 verifier vs Dense-BlockH4 verifier
+
+> 完整报告：`/root/data/experiments/v3a5_g64_verifier/findings_v3a5a.md`
+> 计划：`/root/projects/V3A5_G64_VERIFIER_PLAN.md` + `V3A5A_FIX_PLAN.md`
+> 日期：2026-09-28；dev64；**未进 5B、未跑 official Test**
+> 训练 commit `626a0fa`；评估 reporting 修正 `dead183`
+
+### 30.1 判定：**Case C** — A1 ≈ A0，且两者都差
+
+| state（dev） | R1 | A0 Dense | A1 G64 | AO64 |
+|---|---:|---:|---:|---:|
+| correct | 20.1589 | 19.9828 | **19.9849** | 20.4483 |
+| true_dark_g0.5 | 19.6001 | 19.6770 | **19.6768** | 20.0318 |
+| mismatch | 19.4895 | 19.7447 | **19.7433** | 20.3824 |
+
+```text
+A1 − A0（三 state 平均）= +0.0002 dB
+A1-correct vs R1         = −0.174 dB   （门槛 R1−0.02）❌
+Recovery64(correct)      ≈ −0.60       （丢掉 R1 已有收益的约 60%）
+Recovery64(dark/mis)     ≈ 0.18 / 0.28
+```
+
+把 gate 从 100×150 降到 nested 64×64 后，PSNR 差在千分之二 dB 内。
+→ **关闭"把 gate 变粗就能救 verifier"**。
+
+### 30.2 机制：target 极化，预测却平坦在 0.5
+
+| | mean | std | frac(=0) | frac(=1) |
+|---|---:|---:|---:|---:|
+| G64 target（correct） | 0.58 | 0.38 | 0.38 | 0.54 |
+| A1 学出的 q_v | ~0.54 | **~0.05** | **0** | **0** |
+
+约 **91%** 的 block 是硬 0/1；学出来 std 小约 8 倍、从不 commit。
+相对常数 0.5 预测器，MAE 只改善 **1–3%**。这同时解释 A0≈A1（常数场与分辨率无关）
+和 correct 掉点 / harmful 略收益（处处只应用一半修正）。
+
+### 30.3 当前状态与候选方向（未执行）
+
+**能下的结论**：自 V3-A.4 以来的 learnability 问题**不是**分辨率/target 复杂度造成的；
+瓶颈在 gate 是否被学成决策。
+
+**不能下**：本轮协议（full-image、无 crop）与 V3-A.4 不同，correct −0.174
+不可直接比 C0 的 −0.06；也不是"action-optimal 一般不可学"。
+
+候选（plan §21 Case C，未做）：
+1. output-space supervision（L1 在好坏各半时最优解偏向 q≈0.5）；
+2. 输入表示 / receptive field；
+3. target 是否依赖 verifier 看不到的信息。
+
+按 plan：5A 未过 → **不进 5B（global prior）**。
+
+---
+
+## 31. V3-A 系列至此的合并结论（截至 2026-09-28；§32 已补充）
+
+```text
+已否定 / 可关闭
+  · V3-A 原 H/8+hallucination 配方（Fail，尺度失控）——但 H/8 天花板被低估（§25）
+  · "把 action 通道原样接入就能提升"（§27 尺度死、§28 冗余）
+  · "把 gate 变粗到 G64 就能训出来"（§30 A1≡A0）
+  · "correct −0.06 来自 q_opt 不稳"（§29.1 否证）
+  · "0.1*output L1 阻止 tiny-set 拟合 q*"（§32 C1≡C0）
+
+仍成立的阳性
+  · V2-stable proposal 在 LOL base 上 R1-correct +0.15（§24）
+  · ActionOptimal gate headroom +0.38（§26）；H/8 GT-gate +1.56（§25）
+  · Oracle：G64 regional 足够吃 95%+ headroom（§29.3）
+  · Verifier 能降低 harmful 伤害（多轮一致），但 correct 侧常被拖累
+
+当前最大开放问题（§32 后）
+  · tiny16 上也背不下极化 q*（C0/C1 双失败）
+    → 下一刀：**architecture / RF / representation**（或输入可预测性），
+      不是继续扫 out_weight / grid 大小 / 进 5B
+```
+
+完整分报告索引：
+
+```text
+v3a_lolv2real/findings_v3a.md
+v3a1_lolv2real/findings_v3a1{,_prerequisite}.md
+AUDIT_2026-09-27.md
+v3a2_lolv2real/findings_v3a2.md
+v3a3_lolv2real/findings_v3a3.md
+v3a4_lolv2real/findings_v3a4.md
+v3a41_target_audit_v2/findings_v3a41.md
+v3a42_blockwise_oracle/findings_v3a42.md
+v3a43_fine_resolution/findings_v3a43.md
+v3a5_g64_verifier/findings_v3a5a.md
+v3a5c_tiny_overfit/findings_v3a5c.md
+```
+
+---
+
+## 32. V3-A.5C：Tiny-Set q* Overfit Audit
+
+> 完整报告：`/root/data/experiments/v3a5c_tiny_overfit/findings_v3a5c.md`
+> 计划：`/root/projects/V3A5C_TINY_OVERFIT_AUDIT_PLAN.md`
+> 日期：2026-09-28；**train==eval**（故意 memorization）；未跑 Test/dev64
+
+### 32.1 判定：**C0_fail + C1_fail**（Case C1-C）
+
+| 臂 | masked MAE | masked corr | dec acc | std_ratio |
+|---|---:|---:|---:|---:|
+| C0 @20k（gate+0.1·L1） | 0.254 | 0.570 | 0.832 | 0.620 |
+| C1 @20k（gate-only） | 0.259 | 0.574 | 0.830 | 0.611 |
+
+主成功要 `mMAE≤0.10 ∧ mCorr≥0.80 ∧ acc≥0.90`——两边都远未达到；
+C0 因 `mMAE>0.20` 明确 hard-fail。C1 相对 C0：MAE/corr 改善 ≈ **0**，
+§18 三条全不过 → **不是 output-loss 冲突**。
+
+### 32.2 含义
+
+1. 当前 G64 verifier **在 48 个固定 pair 上也背不下** 极化 q*（缓慢改善但饱和太高）。
+2. 关掉 `0.1·L1` 曲线几乎重合 → 可关闭“中间值塌缩来自 output term”这一刀。
+3. 有弱空间相关（~0.55）但仍严重欠极化 → 下一轮查 **RF / 表示 / 输入可预测性**，
+   不扫 loss weight、不进 5B。
+
+Tiny16 本身合格（mean G64 headroom +0.54 dB；三 state 均有 G64>G1）。
