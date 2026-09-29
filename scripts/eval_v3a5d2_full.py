@@ -192,6 +192,8 @@ def main():
         print('loaded %s from %s' % (arm, ck), flush=True)
 
     results = {}
+    base_by_split = {}
+    r1_by_split = {}
     for tag in split_tags:
         print('=== eval %s ===' % tag, flush=True)
         ds = make_dataset(ns, rows[tag],
@@ -199,14 +201,14 @@ def main():
                           mmaps[tag])
         n = len(rows[tag])
         results[tag] = {}
-        base_ref, r1_ref = None, None
         for arm in ARMS:
             print('  arm %s' % arm, flush=True)
             by, base_psnr, r1_psnr = eval_split(
                 models[arm], ds, n, geom, thr, proposal, a.device, a.limit)
             results[tag][arm] = by
             if arm == 'A1_multiscale':
-                base_ref, r1_ref = base_psnr, r1_psnr
+                base_by_split[tag] = base_psnr
+                r1_by_split[tag] = r1_psnr
             for s in STATES:
                 o = by[s]
                 print('    %s  PSNR=%.3f mCorr=%.3f mMAE=%.3f Rec64=%s acc=%.3f'
@@ -215,20 +217,14 @@ def main():
                           if np.isfinite(o['Recovery64']) else 'nan'),
                          o['decision_accuracy']), flush=True)
 
-    # V5A A1_g64 mean dev mCorr for reference (~0.14)
+    # V5A A1_g64 mean dev mCorr reference (~0.14)
     v5a_mcorr = 0.14
-    try:
-        s = json.load(open(os.path.join(a.v5a_root, 'diagnostics', 'summary.json')))
-        vals = []
-        for st in STATES:
-            # structure varies; best-effort
-            block = s.get('tables', s.get('report', {}))
-        # hardcode from known V5A numbers if parse fails
-    except Exception:
-        pass
 
+    if 'dev' not in results:
+        raise SystemExit('D2-full verdict requires --splits to include dev')
     verdict = verdict_d2_full(
-        results['dev'], base_ref, r1_ref, v5a_dev_mcorr_ref=v5a_mcorr)
+        results['dev'], base_by_split['dev'], r1_by_split['dev'],
+        v5a_dev_mcorr_ref=v5a_mcorr)
     verdict['step'] = a.step
     verdict['v5a_dev_mcorr_ref'] = v5a_mcorr
     dump_json(os.path.join(a.root, 'diagnostics', 'd2_full_verdict.json'), verdict)

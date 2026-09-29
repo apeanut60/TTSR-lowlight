@@ -46,6 +46,8 @@
 | §33 | V3-A.5D0：evidence audit（零训练） | ✅ **PASS（仅准则 C）**；A/B 未过；弱 decile → 人工 D1，不自动训 |
 | §34 | V3-A.5D1：narrow evidence tiny overfit | ✅ **D1_null**；A1≈A0（略差）→ 关闭 evidence，进 D2 |
 | §35 | V3-A.5D2：MultiScale RF tiny overfit | ✅ **D2_strong_success**；A1 mCorr 0.98 → RF 是瓶颈；下一轮 D2-full |
+| §36 | V3-A.5D2-full：MultiScale @3k train575 | ✅ **D2_full_fail（协议内）**；train 也差 → 非已证泛化失败；下一轮 D2.1 |
+| §37 | V3-A.5D2.1：train64 exposure audit | ✅ **Case B**；train64 可拟合 (corr0.83) / dev64≈0.09 → 可记不可迁 |
 
 ## 0.1 摘要（截至 §17；V3-A 系列见 §31）
 
@@ -1911,3 +1913,50 @@ T 等价硬 invariant：`T/gate/delta/D/sr` max_abs = 0（相对冻结 R1）。
 1. **RF/context 是当前 verifier 学不动 q* 的主因**（对比 D1 evidence 无效）。  
 2. D3（evidence+MS）不跑（D1 已关闭）。  
 3. 下一轮：**D2-full**（train575→dev64 泛化）；本轮 STOP。
+
+---
+
+## 36. V3-A.5D2-full：3k-step protocol 下 FAIL（尚未证“不可泛化”）
+
+> 完整报告：`/root/data/experiments/v3a5d2_rf_full/findings_v3a5d2_full.md`  
+> 日期：2026-09-29；gate-only 3000 steps；**未跑** Test / D3
+
+### 36.1 判定：**D2_full_fail**（仅当前 3k protocol）→ **D2.1**
+
+| 指标（dev） | A0 | A1 MultiScale | 门槛 |
+|---|---:|---:|---|
+| mean mCorr | 0.140 | 0.175 | ≥0.40 |
+| train575 mCorr | ~0.10–0.19 | ~0.10–0.19 | （自身也差） |
+| Recovery64>0 | — | 0/3 | ≥2/3 |
+
+暴露量：tiny ≈1667 micro/pair vs full@3k ≈7 → **~240× 差距**。  
+train 与 dev 都差 ≠ 典型“train 好 / 泛化差”。
+
+### 36.2 修正后的含义
+
+1. 协议内：MultiScale **没有**在 3k-full 上改善 q\* / PSNR。  
+2. **不能**据此断言 q\* 跨图不可预测或立刻换 target。  
+3. D2 tiny（0.57→0.975）仍支持：更大 capacity/context **能表示** q\*。  
+4. 下一轮：**D2.1** 64-image exposure-controlled scaling audit。
+
+---
+
+## 37. V3-A.5D2.1：64-image Exposure / Scale Audit
+
+> 完整报告：`/root/data/experiments/v3a5d21_scale64/findings_v3a5d21.md`  
+> 日期：2026-09-30；A1 MultiScale；192 pairs；~417 exp/pair @20k
+
+### 37.1 判定：**Case B**（memorize ≠ transfer）
+
+| split @20k | mMAE | mCorr | acc |
+|---|---:|---:|---:|
+| train64 | 0.085 | 0.830 | 0.947 |
+| dev64 | 0.450 | 0.094 | 0.549 |
+
+Exposure 曲线：train corr 5k→20k = 0.35→0.83；**dev 始终 ~0.05–0.10**。
+
+### 37.2 含义
+
+1. D2-full@3k 的失败确实混有 **under-exposure**（64 上加步数就能拟合）。  
+2. 但足够暴露后仍 **不能跨到 dev64** → 支持 q\* 对 image identity 的可记忆性 ≫ 跨图可预报性。  
+3. 下一轮优先 **Target Predictability Audit**，而不是盲目拉满 575×同等 exposure。
