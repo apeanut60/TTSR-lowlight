@@ -48,6 +48,8 @@
 | §35 | V3-A.5D2：MultiScale RF tiny overfit | ✅ **D2_strong_success**；A1 mCorr 0.98 → RF 是瓶颈；下一轮 D2-full |
 | §36 | V3-A.5D2-full：MultiScale @3k train575 | ✅ **D2_full_fail（协议内）**；train 也差 → 非已证泛化失败；下一轮 D2.1 |
 | §37 | V3-A.5D2.1：train64 exposure audit | ✅ **Case B**；train64 可拟合 (corr0.83) / dev64≈0.09 → 可记不可迁 |
+| §38 | V3-A.5E0：Evidence Predictability Audit | ✅ **E0_EVIDENCE_UNPREDICTABLE**；10 evidence→q\* R²≈0.03；下一步 E1（Z probe） |
+| §39 | V3-A.5E1：Visual Z Predictability Audit | ✅ **E1_Z_IDENTITY**；same-NN 0.76 / cross 0.15 → redefine_target |
 
 ## 0.1 摘要（截至 §17；V3-A 系列见 §31）
 
@@ -1960,3 +1962,52 @@ Exposure 曲线：train corr 5k→20k = 0.35→0.83；**dev 始终 ~0.05–0.10*
 1. D2-full@3k 的失败确实混有 **under-exposure**（64 上加步数就能拟合）。  
 2. 但足够暴露后仍 **不能跨到 dev64** → 支持 q\* 对 image identity 的可记忆性 ≫ 跨图可预报性。  
 3. 下一轮优先 **Target Predictability Audit**，而不是盲目拉满 575×同等 exposure。
+
+---
+
+## 38. V3-A.5E0：Evidence Predictability Audit（零训练）
+
+> 完整报告：`/root/data/experiments/v3a5e_predictability/findings_v3a5e.md`  
+> 日期：2026-09-30；冻结 R1 + G64 q\*/energy；**仅** 10 路手工 proposal/match observables → q\*（无 H）
+
+### 38.1 判定：**E0_EVIDENCE_UNPREDICTABLE**
+
+| 探针 | train | dev |
+|---|---|---|
+| block ridge R² / corr | 0.030 / 0.173 | 0.038 / 0.197 |
+| block MLP R² / corr | 0.019 / 0.140 | 0.013 / 0.116 |
+| image ridge corr | 0.244 | 0.172 |
+| NN block spearman / mean\|Δq\| | 0.136 / 0.446 | — |
+
+单特征条件方差最大 explained ≈2.2%（`sim_max`）。`next_step=E1_visual_Z_probe`。  
+MLP≪ridge → 不以 MLP 单独证明“非线性也无信息”。
+
+### 38.2 含义（收束）
+
+1. **已证**：这 10 个 evidence 解释不了 q\*；继续堆 matcher confidence / gate_v2 / \|D\| 等路线可关（与 D0/D1 一致）。  
+2. **未证**：\(q^* \leftarrow X,Y_0,R\) / MultiScale head 前特征 \(Z\) 是否也可预报——E0 测的不是 verifier 真正可见的高维表示。  
+3. 下一轮：**E1 Visual-Feature Predictability**（冻结 A1，截 G64 \(Z\) → linear/MLP + same vs cross-image NN）；E1 仍死后才有底气 `redefine_target`。
+
+---
+
+## 39. V3-A.5E1：Visual-Feature (Z) Predictability Audit
+
+> 完整报告：`/root/data/experiments/v3a5e1_visual_z/findings_v3a5e1.md`  
+> 日期：2026-09-30；冻结 D2 A1 shared-init；\(Z=\)G64-pool\((F_\mathrm{common})\)（160-d）；train575→dev64
+
+### 39.1 判定：**E1_Z_IDENTITY**
+
+| 探针 | train | dev |
+|---|---|---|
+| ridge R² / corr | 0.045 / 0.213 | 0.035 / 0.188 |
+| MLP R² / corr | 0.186 / 0.432 | 0.049 / 0.257 |
+| NN same / cross spearman | **0.756** / **0.146** | — |
+| NN dev→train spearman | — | 0.144 |
+
+`next_step=redefine_target`。非 head-gap（dev corr≪0.5）。
+
+### 39.2 含义
+
+1. E0 关掉 evidence；E1 证明 **verifier 可见的高维 Z 也几乎无跨图 \(q^*\) 映射**。  
+2. 图内 NN 很强、跨图 NN≈E0 → 与 D2.1 Case B 同构：可记 identity，不可迁。  
+3. 至此对 `q*_G64` 作为当前 verifier 监督目标可正式判负；优先 **目标重定义**，而非再冲 575×exposure。
