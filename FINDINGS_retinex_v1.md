@@ -49,7 +49,8 @@
 | §36 | V3-A.5D2-full：MultiScale @3k train575 | ✅ **D2_full_fail（协议内）**；train 也差 → 非已证泛化失败；下一轮 D2.1 |
 | §37 | V3-A.5D2.1：train64 exposure audit | ✅ **Case B**；train64 可拟合 (corr0.83) / dev64≈0.09 → 可记不可迁 |
 | §38 | V3-A.5E0：Evidence Predictability Audit | ✅ **E0_EVIDENCE_UNPREDICTABLE**；10 evidence→q\* R²≈0.03；下一步 E1（Z probe） |
-| §39 | V3-A.5E1：Visual Z Predictability Audit | ✅ **E1_Z_IDENTITY**；same-NN 0.76 / cross 0.15 → redefine_target |
+| §39 | V3-A.5E1：init Visual Z Audit | ✅ **E1_INIT_Z_CROSS_PAIR_WEAK**；dev→train≈0.14 可信；HOLD redefine → E1b |
+| §40 | V3-A.5E1b：Trained-Z Closure | ✅ **E1B_Z_IDENTITY_CONFIRMED**；far≈0.87 / held-out≈0.08 → redefine_target |
 
 ## 0.1 摘要（截至 §17；V3-A 系列见 §31）
 
@@ -1995,19 +1996,45 @@ MLP≪ridge → 不以 MLP 单独证明“非线性也无信息”。
 > 完整报告：`/root/data/experiments/v3a5e1_visual_z/findings_v3a5e1.md`  
 > 日期：2026-09-30；冻结 D2 A1 shared-init；\(Z=\)G64-pool\((F_\mathrm{common})\)（160-d）；train575→dev64
 
-### 39.1 判定：**E1_Z_IDENTITY**
+### 39.1 判定：**E1_INIT_Z_CROSS_PAIR_WEAK**（HOLD redefine）
 
 | 探针 | train | dev |
 |---|---|---|
 | ridge R² / corr | 0.045 / 0.213 | 0.035 / 0.188 |
 | MLP R² / corr | 0.186 / 0.432 | 0.049 / 0.257 |
-| NN same / cross spearman | **0.756** / **0.146** | — |
-| NN dev→train spearman | — | 0.144 |
+| NN same-pair* / cross-pair* | 0.756 / 0.146 | — |
+| NN **dev→train** spearman | — | **0.144** |
 
-`next_step=redefine_target`。非 head-gap（dev corr≪0.5）。
+\*代码 id=`name|state`，非严格 image。`next_step=E1b_trained_Z_closure`。非 head-gap。
 
-### 39.2 含义
+### 39.2 含义（收束）
 
-1. E0 关掉 evidence；E1 证明 **verifier 可见的高维 Z 也几乎无跨图 \(q^*\) 映射**。  
-2. 图内 NN 很强、跨图 NN≈E0 → 与 D2.1 Case B 同构：可记 identity，不可迁。  
-3. 至此对 `q*_G64` 作为当前 verifier 监督目标可正式判负；优先 **目标重定义**，而非再冲 575×exposure。
+1. **可信**：init visual Z 上跨 split 几乎预报不了 q\*（dev→train）。  
+2. **未证**：trained MultiScale Z；严格 cross-image；same 高分是否仅为空间局部。  
+3. **不**据此立即正式 `redefine_target` → **E1b**。
+
+---
+
+## 40. V3-A.5E1b：Trained-Z Closure（D2.1 ckpt 20k）
+
+> 完整报告：`/root/data/experiments/v3a5e1b_trained_z/findings_v3a5e1b.md`  
+> 日期：2026-09-30；A1 `ckpt_020000`；train64 vs dev64；严格 image_id + spatial-far
+
+### 40.1 判定：**E1B_Z_IDENTITY_CONFIRMED**
+
+| 探针 | train64 | held-out |
+|---|---|---|
+| MLP corr / R² | 0.921 / 0.847 | dev corr **0.101** |
+| ridge corr | 0.779 | **0.088** |
+| NN same-pair-far4/8 | 0.871 / 0.866 | — |
+| NN same-image≠state | 0.853 | — |
+| NN cross **within train64** | 0.860 | （集合内记忆，≠转移） |
+| NN **dev→train** | — | **0.079** |
+
+`context_residual≈0.18`（MultiScale 激活）。`next_step=redefine_target`。非 head-gap。
+
+### 40.2 含义
+
+1. E1 review 三缺口已闭：真 image id、trained Z、spatial-far（far 不塌）。  
+2. within-train cross 高 + held-out 死 → **set memorization**，不是可迁移 \(Z\to q^*\)。  
+3. 至此可正式 **redefine_target**；不是 fix head。
