@@ -23,9 +23,9 @@ from v3a5_runtime import (STATES, bit_equal, block_energy, energy_mask, # noqa: 
                           target_geometry)
 from v3a5c_runtime import make_pair_schedule                            # noqa: E402
 from v3a6_runtime import CKPT_STEPS, DEFAULT_UPDATES, GRAD_ACCUM, LR, SEED  # noqa: E402
-from v3a7_runtime import (ARMS, OBJECTIVES, arm_loss, dump_json,        # noqa: E402
-                          file_sha256, git_head, hard_verify_lock,
-                          masked_fraction)
+from v3a7_runtime import (ARMS, FORMAL_LOCK_KEYS, OBJECTIVES, arm_loss,  # noqa: E402
+                          dump_json, file_sha256, git_head,
+                          hard_verify_lock, masked_fraction)
 
 SRC = '/root/data/experiments/v3a1_lolv2real'
 V4 = '/root/data/experiments/v3a4_lolv2real'
@@ -86,10 +86,22 @@ def main():
 
     lock = json.load(open(os.path.join(a.root, 'artifact_lock.json')))
     thr = float(lock['energy_threshold'])
+    missing = [k for k in FORMAL_LOCK_KEYS if k not in lock]
+    if missing and a.formal and not a.smoke:
+        raise SystemExit('artifact_lock missing keys: %s' % missing)
     hard_verify_lock(lock, dict(
         energy_threshold=thr, seed=a.seed, pair_schedule_seed=a.seed,
         official_test_allowed=False,
         architecture='V3A5D2Verifier.A1_multiscale',
+        geometry='g64', bottleneck=64,
+        proposal_sha256=file_sha256(lock['proposal_ckpt']),
+        split_sha256=file_sha256(lock['split_json']),
+        mismatch_train_sha256=file_sha256(lock['mismatch_train']),
+        mismatch_dev_sha256=file_sha256(lock['mismatch_dev']),
+        reference_variant=a.variant,
+        init_sha=lock['init_sha'],
+        updates=a.updates, grad_accum=a.grad_accum, lr=a.lr,
+        mask_mode='g64_proposal_energy_expand',
     ), formal=a.formal and not a.smoke)
 
     arm_dir = os.path.join(a.root, a.arm)

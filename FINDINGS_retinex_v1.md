@@ -2084,5 +2084,30 @@ mean Δ(A1−A0)：3k **+0.031**（未过 +0.05）→ 10k −0.005 → 20k **−
 ### 42.2 含义
 
 1. block 二值 GT utility **不能**胜过 naive output-MSE。  
-2. 下一候选（若继续 verifier）：\(L=-qU\) 或 **image-level** selective；仍禁止 q\* regression / 加 RF。  
+2. 下一候选曾写 \(L=-qU\) / image-level；**V3-A.7.1 已测**：image U 并不更可迁，见 §43。  
 3. 更可能：observable 网学不出 held-out 的 proposal 效用。
+
+---
+
+## 43. V3-A.7.1：Utility Predictability Audit（零训练）
+
+> 完整报告：`/root/data/experiments/v3a71_utility_predictability/findings_v3a71.md`  
+> 日期：2026-10-03；F0/F1/F2 × block/image；train575→dev64；不训 verifier
+
+### 43.1 判定：**V3A71_CASE_C_RANKING_COVERAGE**
+
+| | train corr | **dev corr** | AUROC | NN cross / dev→train |
+|---|---:|---:|---:|---|
+| block F2 | 0.295 | **0.146** | 0.588 | 0.15 / 0.09 |
+| image F2 | 0.478 | **0.110** | 0.581 | 0.28 / 0.23 |
+
+top10% predicted-U 桶真实 pos_rate≈0.73（block）/ 0.79（image），桶均值单调。  
+decision PSNR：block-F2 19.824 ≈ V3-A.6 A1；oracle image-sign 20.060。
+
+**不是** Case A（image 可迁）也 **不是** Case B（block |U| 可迁）。自动机曾把 “bins 单调” 误打成 B，已改为 C。
+
+### 43.2 含义
+
+1. 换 real-valued U 仍过不了 held-out；image 并不比 block 更稳。  
+2. 仅保留弱 coverage：高 Û 才开 D。禁止据此 GO `L=-qU` / dense image gate。  
+3. 仍禁止 official Test、q\* 堆叠、加 RF。

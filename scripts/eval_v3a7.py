@@ -22,9 +22,11 @@ from v3a5_runtime import (STATES, action_optimal_target, block_energy,  # noqa: 
                           energy_mask, expand_gate, prepare_geometry,
                           recovery, target_geometry)
 from v3a5c_runtime import aggregate_pair_metrics, pair_gate_bundle      # noqa: E402
-from v3a6_runtime import (CONSTANT_Q, constant_q_psnr, nanmean,         # noqa: E402
-                          require_ckpt, verdict_v3a6)
-from v3a7_runtime import accept_target, block_utility, dump_json        # noqa: E402
+from v3a6_runtime import (CONSTANT_Q, constant_q_psnr, file_sha256,     # noqa: E402
+                          hard_verify_lock, nanmean, require_ckpt)
+from v3a7_runtime import (FORMAL_LOCK_KEYS, accept_target, block_utility,  # noqa: E402
+                          deployable_global_constant, dump_json,
+                          verdict_v3a7)
 
 SRC = '/root/data/experiments/v3a1_lolv2real'
 V4 = '/root/data/experiments/v3a4_lolv2real'
@@ -137,6 +139,20 @@ def main():
     a = ap.parse_args(_CLI)
 
     lock = json.load(open(os.path.join(a.root, 'artifact_lock.json')))
+    missing = [k for k in FORMAL_LOCK_KEYS if k not in lock]
+    if missing:
+        raise SystemExit('artifact_lock missing keys: %s' % missing)
+    hard_verify_lock(lock, dict(
+        proposal_sha256=file_sha256(lock['proposal_ckpt']),
+        split_sha256=file_sha256(lock['split_json']),
+        mismatch_train_sha256=file_sha256(lock['mismatch_train']),
+        mismatch_dev_sha256=file_sha256(lock['mismatch_dev']),
+        official_test_allowed=False,
+        architecture='V3A5D2Verifier.A1_multiscale',
+        geometry='g64',
+        bottleneck=64,
+        reference_variant=a.variant,
+    ), formal=True)
     thr = float(lock['energy_threshold'])
     geom = prepare_geometry(target_geometry(REF_H, REF_W, 'g64'), a.device)
     proposal = load_proposal(os.path.join(a.src_root, R1_CK), a.device)
@@ -163,6 +179,16 @@ def main():
         model, blob = load_arm(ckpt, a.device)
         if int(blob.get('step', -1)) != int(a.step):
             raise SystemExit('ckpt step mismatch %s' % ckpt)
+        if arm == 'A1_utility_bce':
+            if blob.get('arm') not in (None, 'A1_utility_bce'):
+                raise SystemExit('ckpt arm mismatch %s' % blob.get('arm'))
+            if blob.get('objective') not in (None, 'utility_accept_bce'):
+                raise SystemExit('ckpt objective mismatch')
+            if blob.get('init_sha') and blob['init_sha'] != lock.get('init_sha'):
+                raise SystemExit('ckpt init_sha mismatch')
+            if (blob.get('proposal_sha')
+                    and blob['proposal_sha'] != lock.get('proposal_sha256')):
+                raise SystemExit('ckpt proposal_sha mismatch')
         out, const_m, const_b, gate = eval_arm(
             model, ds, len(splits['dev']), geom, thr, proposal, a.device,
             limit=a.limit)
@@ -183,10 +209,13 @@ def main():
         state_qmean_std=float(np.std([gate_a1[s]['q_mean'] for s in STATES])),
         per_state=gate_a1,
     )
-    verdict = verdict_v3a6(a0_psnr, a1_psnr, base, r1, const_best, gate_stats)
+    gq = deployable_global_constant(results['A0_decision_mse']['constant_q'])
+    verdict = verdict_v3a7(
+        a0_psnr, a1_psnr, base, r1, const_best, gate_stats, global_const=gq)
     verdict['step'] = a.step
     verdict['a0_is'] = 'V3-A.6 A1_decision_mse'
     verdict['a1_is'] = 'utility_accept_bce'
+    verdict['const_best_per_state'] = const_best
 
     out_dir = os.path.join(a.root, 'diagnostics', 'eval_%06d' % a.step)
     dump_json(os.path.join(out_dir, 'dev_results.json'), results)
@@ -200,8 +229,8 @@ def main():
 
     print('VERDICT', verdict['label'], 'next=', verdict['next_step'], flush=True)
     print('  meaning:', verdict['meaning'], flush=True)
-    print('  mean Δ(A1-A0)=%.3f  beat_cq=%s  q_collapsed=%s'
-          % (verdict['delta_a1_a0'], verdict['beat_constant_q'],
+    print('  mean Δ(A1-A0)=%.3f  beat_global_const=%s  q_collapsed=%s'
+          % (verdict['delta_a1_a0'], verdict['beat_global_constant'],
              verdict['q_collapsed']), flush=True)
     for s in STATES:
         print('  %s  Base=%.3f R1=%.3f cq*=%.3f A0=%.3f A1=%.3f AO=%.3f accU=%.3f'

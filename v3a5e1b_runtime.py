@@ -23,11 +23,18 @@ def file_sha256(path, chunk=1 << 20):
 
 
 def _pack(amb, y_self, y_nn, extra=None):
+    if amb:
+        ys = np.asarray(y_self, dtype=np.float64)
+        yn = np.asarray(y_nn, dtype=np.float64)
+        sign_agree = float(np.mean((yn > 0) == (ys > 0)))
+    else:
+        sign_agree = float('nan')
     out = dict(
         mean_abs=float(np.mean(amb)) if amb else float('nan'),
         median_abs=float(np.median(amb)) if amb else float('nan'),
         spearman=spearman(y_self, y_nn) if len(y_self) >= 5 else float('nan'),
         pearson=pearson(y_self, y_nn) if len(y_self) >= 5 else float('nan'),
+        sign_agree=sign_agree,
         n=int(len(amb)),
     )
     if extra:
