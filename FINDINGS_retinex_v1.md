@@ -2092,7 +2092,8 @@ mean Δ(A1−A0)：3k **+0.031**（未过 +0.05）→ 10k −0.005 → 20k **−
 ## 43. V3-A.7.1：Utility Predictability Audit（零训练）
 
 > 完整报告：`/root/data/experiments/v3a71_utility_predictability/findings_v3a71.md`  
-> 日期：2026-10-03；F0/F1/F2 × block/image；train575→dev64；不训 verifier
+> 日期：2026-10-03；F0/F1/F2 × block/image；train575→dev64；不训 verifier  
+> F2 = D2.1 A1 `ckpt_020000` 的 **q\*_G64 gate-only** Z（非 V3-A.6 output-MSE）
 
 ### 43.1 判定：**V3A71_CASE_C_RANKING_COVERAGE**
 
@@ -2111,3 +2112,28 @@ decision PSNR：block-F2 19.824 ≈ V3-A.6 A1；oracle image-sign 20.060。
 1. 换 real-valued U 仍过不了 held-out；image 并不比 block 更稳。  
 2. 仅保留弱 coverage：高 Û 才开 D。禁止据此 GO `L=-qU` / dense image gate。  
 3. 仍禁止 official Test、q\* 堆叠、加 RF。
+
+---
+
+## 44. V3-A.7.2：Selective Coverage Closure（零训练）
+
+> 完整报告：`/root/data/experiments/v3a72_selective_closure/findings_v3a72.md`  
+> 日期：2026-10-03；energy-mask 政策；train 标定 τ；P1-10% 预注册；BinaryBlockOracle；cluster bootstrap
+
+### 44.1 判定：**V3A72_CASE_C_EXPLORATORY_WEAK**（NO_FORMAL_GO）
+
+| | |
+|---|---|
+| correct F2 top10 mean U CI | **[0.0078, 0.0189]**（不穿 0） |
+| P1-10 F2 / F0 PSNR | 19.765 / 19.794 |
+| 门槛 | >Base+0.05 **且** ≥ V3-A.6 A1−0.01（19.821）→ **失败** |
+| BinaryBlockOracle | **20.271**（−Base +0.57） |
+| F2 top10 state share | correct 0.68（非纯状态分类） |
+
+能量 mask 后的 19.765 取代 7.1 unmasked 19.824 作为正式 block 政策数字。
+
+### 44.2 含义
+
+1. Case C 的 ranking 在 **correct 内部** 成立，不是纯 coarse-state。  
+2. train→dev 的 selective 政策仍打不过已有 decision-MSE → **不训 V3-A.8 gate**。  
+3. 更高覆盖档（F0-30% 19.863）是 dev 观察，禁止事后立 GO。
