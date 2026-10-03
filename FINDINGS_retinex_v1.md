@@ -51,6 +51,8 @@
 | §38 | V3-A.5E0：Evidence Predictability Audit | ✅ **E0_EVIDENCE_UNPREDICTABLE**；10 evidence→q\* R²≈0.03；下一步 E1（Z probe） |
 | §39 | V3-A.5E1：init Visual Z Audit | ✅ **E1_INIT_Z_CROSS_PAIR_WEAK**；dev→train≈0.14 可信；HOLD redefine → E1b |
 | §40 | V3-A.5E1b：Trained-Z Closure | ✅ **E1B_Z_IDENTITY_CONFIRMED**；far≈0.87 / held-out≈0.08 → redefine_target |
+| §41 | V3-A.6：Decision-Aligned Gate | ✅ **CASE_D_FAIL**；A1≈A0（Δ+0.005）；next=utility/selective_risk |
+| §42 | V3-A.7：GT utility accept/reject | ✅ **CASE_D_NO_GAIN**；block BCE vs MSE Δ@20k=−0.003 |
 
 ## 0.1 摘要（截至 §17；V3-A 系列见 §31）
 
@@ -2038,3 +2040,49 @@ MLP≪ridge → 不以 MLP 单独证明“非线性也无信息”。
 1. E1 review 三缺口已闭：真 image id、trained Z、spatial-far（far 不塌）。  
 2. within-train cross 高 + held-out 死 → **set memorization**，不是可迁移 \(Z\to q^*\)。  
 3. 至此可正式 **redefine_target**；不是 fix head。
+
+---
+
+## 41. V3-A.6：Decision-Aligned Gate（A0 q\* vs A1 output-MSE）
+
+> 完整报告：`/root/data/experiments/v3a6_decision_gate/findings_v3a6.md`  
+> 日期：2026-09-30；MultiScale；train575→dev64；20k；唯一变量=loss
+
+### 41.1 判定：**V3A6_CASE_D_FAIL**（3k/10k/20k 一致）
+
+| @20k | Base | R1 | const\* | A0 | A1 | AO64 |
+|---|---:|---:|---:|---:|---:|---:|
+| correct | 19.699 | 20.159 | 20.159 | 20.011 | 20.028 | 20.448 |
+| dark | 19.699 | 19.600 | 19.699 | 19.696 | 19.719 | 20.032 |
+| mismatch | 19.699 | 19.490 | 19.744 | 19.771 | 19.745 | 20.382 |
+
+mean Δ(A1−A0)≈**+0.005**（远低于 +0.05 GO 线）；correct 未保 R1；非 q 塌缩。
+
+### 41.2 含义
+
+1. 仅把监督换成 output-MSE **不能**绕过 E1b 暴露的可迁移决策困境。  
+2. 下一步：**GT-derived utility / selective-risk**；禁止回到 q\* regression 堆叠。  
+3. Caveat：A1 曾于 10k 断线后续训（Adam 重置）；但 3k/10k 已同为 Case D。
+
+---
+
+## 42. V3-A.7：GT Block-Utility Accept/Reject
+
+> 完整报告：`/root/data/experiments/v3a7_utility_gate/findings_v3a7.md`  
+> 日期：2026-10-03；A0=V3-A.6 decision-MSE ckpt；A1=masked BCE on \(1[U_B>0]\)
+
+### 42.1 判定：**V3A7_CASE_D_NO_GAIN**（正式 @20k）
+
+| @20k | Base | R1 | const\* | A0 MSE | A1 BCE | AO64 |
+|---|---:|---:|---:|---:|---:|---:|
+| correct | 19.699 | 20.159 | 20.159 | 20.028 | 20.007 | 20.448 |
+| dark | 19.699 | 19.600 | 19.699 | 19.719 | 19.702 | 20.032 |
+| mismatch | 19.699 | 19.490 | 19.744 | 19.745 | 19.776 | 20.382 |
+
+mean Δ(A1−A0)：3k **+0.031**（未过 +0.05）→ 10k −0.005 → 20k **−0.003**。accept_acc≈0.59。A1 未极化。
+
+### 42.2 含义
+
+1. block 二值 GT utility **不能**胜过 naive output-MSE。  
+2. 下一候选（若继续 verifier）：\(L=-qU\) 或 **image-level** selective；仍禁止 q\* regression / 加 RF。  
+3. 更可能：observable 网学不出 held-out 的 proposal 效用。
