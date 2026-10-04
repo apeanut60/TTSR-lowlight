@@ -2214,3 +2214,28 @@ mean 未达 +0.05；mismatch 均值/large-harm 未达 Case A/B。`normal−self=
 1. A0 复现 old B0（控制干净）。  
 2. Evidence 有因果贡献，但对 mismatch reliability 帮助不够。  
 3. 不保留 B2；B3 global-stat 从 raw-T B0 启动。B1 仍 HOLD。 Official Test 仍禁。
+
+---
+
+## 48. V3-B.3：Global RGB mean/std prior（A0 replay vs A1）
+
+> 完整报告：`/root/data/experiments/v3b3_global_stats/findings_v3b3.md`  
+> 日期：2026-10-04；6 维 RGB01 mean/std；MLP 6→64 broadcast；主比较 A1−A0；无 Test
+
+### 48.1 判定：**V3B3_CASE_D_UNSAFE**（正式 @20k）
+
+| | Base | old B0 | A0 | A1 | A1−A0 |
+|---|---:|---:|---:|---:|---:|
+| correct | 19.699 | 20.184 | 20.184 | 20.522 | +0.338 |
+| dark | 19.699 | 20.140 | 20.140 | 20.542 | +0.402 |
+| mismatch | 19.699 | 20.010 | 20.010 | **19.699** | **−0.311** |
+| mean | 19.699 | 20.111 | **20.111** | **20.254** | **+0.143** |
+
+mean/correct/dark 强，但 mismatch 塌回 Base，large-harm 0.359→0.438。zero-G −0.306（prior 在用）。  
+**next = drop_B3_start_B4。禁止 B3.1。**
+
+### 48.2 含义
+
+1. A0 再次复现 B0。  
+2. 全局颜色统计能解释 B0 低频残差的一部分（low_frac 0.86→0.93），但 **无 reliability 条件时复现 B1 错配放大**。  
+3. 关闭 RGB-output 端再堆 conditioning；下一步 B4 feature-level residual。 Official Test 仍禁。
