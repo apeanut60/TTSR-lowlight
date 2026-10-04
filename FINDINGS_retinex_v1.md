@@ -2137,3 +2137,55 @@ decision PSNR：block-F2 19.824 ≈ V3-A.6 A1；oracle image-sign 20.060。
 1. Case C 的 ranking 在 **correct 内部** 成立，不是纯 coarse-state。  
 2. train→dev 的 selective 政策仍打不过已有 decision-MSE → **不训 V3-A.8 gate**。  
 3. 更高覆盖档（F0-30% 19.863）是 dev 观察，禁止事后立 GO。
+
+---
+
+## 45. V3-B.0：Minimal Implicit RGB Residual
+
+> 完整报告：`/root/data/experiments/v3b0_implicit_residual/findings_v3b0.md`  
+> 日期：2026-10-03；Frozen Y0+matcher；`Y=Y0+ΔY(F0,T)`；MSE；20k；无 q/D
+
+### 45.1 判定：**V3B0_CASE_A_STRONG_GO**（正式 @20k）
+
+| | Base | R1 | V3A6 | **B0** | BinOracle |
+|---|---:|---:|---:|---:|---:|
+| correct | 19.699 | 20.159 | 20.028 | **20.184** | 20.434 |
+| dark | 19.699 | 19.600 | 19.719 | **20.140** | 20.022 |
+| mismatch | 19.699 | 19.490 | 19.745 | **20.010** | 20.356 |
+| mean | 19.699 | 19.750 | 19.831 | **20.111** | 20.271 |
+
+Δ vs A6 **+0.280**。`normal−self=+0.060`，`normal−zero=+0.419`。zero≈Base。低频残差占比 0.86。correct 相对 R1 仅 +0.025；harm 尾仍重。
+
+3k/10k PSNR 已高但 self-gap 未过条；不以 10k 换正式点。
+
+### 45.2 含义
+
+1. 取消显式 q 的最小 implicit residual **可以**超过 V3-A.6；主要赢在 dark/mismatch。  
+2. 不是“gate 理论被证伪”；也未吃尽 BinOracle。  
+3. 下一步允许 **只做 B1 adaptation**，禁止同时叠 evidence / AdaIN-B3 / attention。 Official Test 仍禁。
+
+---
+
+## 46. V3-B.1：MASA-style `T_adapt`（B1a / B1b）
+
+> 完整报告：`/root/data/experiments/v3b1_reference_adapt/findings_v3b1.md`  
+> 日期：2026-10-04；同一 B0 head/loss/schedule；唯一变量 T→T_adapt；无 Test
+
+### 46.1 判定：**V3B1_CASE_C_UNSAFE**（两臂正式 @20k）
+
+| | B0 | B1a | B1b |
+|---|---:|---:|---:|
+| mean | 20.111 | 20.158 | 20.244 |
+| ΔB0 | — | +0.046 | +0.133 |
+| correct | 20.184 | 20.420 | 20.405 |
+| dark | 20.140 | 20.374 | 20.470 |
+| mismatch | 20.010 | **19.679** | **19.857** |
+
+mean 过 +0.03，但 mismatch 下降，且 large-harm 相对 B0 超 +0.02（B1a 三态皆超；B1b dark/mismatch 超）。  
+**next = drop_adapt_keep_B0。不训 B2/B3。**
+
+### 46.2 含义
+
+1. adaptation 有真实效果（correct/dark 升、ΔT≠0），**不是** unused 模块。  
+2. 它 **没有** 修好 Nano mismatch；B1a mismatch 甚至低于 Base。  
+3. 主线停在 **frozen B0@20k**。这不能写成 “MASA 无效”，只能写成当前设定下 B1 不能安全替换 raw T。
