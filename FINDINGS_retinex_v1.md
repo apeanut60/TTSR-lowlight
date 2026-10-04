@@ -2188,4 +2188,29 @@ mean 过 +0.03，但 mismatch 下降，且 large-harm 相对 B0 超 +0.02（B1a 
 
 1. adaptation 有真实效果（correct/dark 升、ΔT≠0），**不是** unused 模块。  
 2. 它 **没有** 修好 Nano mismatch；B1a mismatch 甚至低于 Base。  
-3. 主线停在 **frozen B0@20k**。这不能写成 “MASA 无效”，只能写成当前设定下 B1 不能安全替换 raw T。
+3. B1 不能替换 B0。后续 B2 按独立 roadmap 从 **raw-T B0** 加 evidence（不叠 B1）。
+
+---
+
+## 47. V3-B.2：Evidence-as-Feature（A0 replay vs A1）
+
+> 完整报告：`/root/data/experiments/v3b2_evidence_fusion/findings_v3b2.md`  
+> 日期：2026-10-04；共享 init；E=`sim_max/entropy/margin/disp_var`；主比较 A1−A0；无 Test
+
+### 47.1 判定：**V3B2_CASE_C_NULL**（正式 @20k）
+
+| | Base | old B0 | A0 | A1 | A1−A0 |
+|---|---:|---:|---:|---:|---:|
+| correct | 19.699 | 20.184 | 20.184 | 20.216 | +0.032 |
+| dark | 19.699 | 20.140 | 20.140 | 20.201 | +0.061 |
+| mismatch | 19.699 | 20.010 | 20.010 | 20.012 | +0.002 |
+| mean | 19.699 | 20.111 | **20.111** | **20.143** | **+0.032** |
+
+mean 未达 +0.05；mismatch 均值/large-harm 未达 Case A/B。`normal−self=+0.063`；zero-E −0.132（evidence 在用）。  
+**next = drop_B2_start_B3_from_B0。**
+
+### 47.2 含义
+
+1. A0 复现 old B0（控制干净）。  
+2. Evidence 有因果贡献，但对 mismatch reliability 帮助不够。  
+3. 不保留 B2；B3 global-stat 从 raw-T B0 启动。B1 仍 HOLD。 Official Test 仍禁。

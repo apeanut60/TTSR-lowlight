@@ -1,4 +1,4 @@
-"""V3-B.0 minimal implicit RGB residual. Clean-room; no explicit q/D/gate."""
+"""V3-B.0/B.2 implicit RGB residual. Clean-room; no explicit q/D/gate."""
 
 import torch
 import torch.nn as nn
@@ -6,12 +6,17 @@ import torch.nn.functional as F
 
 
 class V3B0ResidualFusion(nn.Module):
-    """u=[F0,T,F0-T] at H/2 → ΔY at Y0 resolution. Last conv is zero-init."""
+    """u=[F0,T,F0-T,(E)] at H/2 → ΔY at Y0 resolution. Last conv is zero-init.
+
+    A0: in_ch=96, E=None.
+    A1: in_ch=100, E is [B,4,H/2,W/2].
+    """
 
     def __init__(self, in_ch=96, hid=64, mid=32, rgb=16):
         super().__init__()
+        self.in_ch = int(in_ch)
         self.stem = nn.Sequential(
-            nn.Conv2d(in_ch, hid, 3, 1, 1, bias=True),
+            nn.Conv2d(self.in_ch, hid, 3, 1, 1, bias=True),
             nn.GELU(),
             nn.Conv2d(hid, hid, 3, 1, 1, bias=True),
             nn.GELU(),
@@ -26,11 +31,20 @@ class V3B0ResidualFusion(nn.Module):
         nn.init.zeros_(self.out.weight)
         nn.init.zeros_(self.out.bias)
 
-    def forward(self, F0, T, out_hw):
+    def forward(self, F0, T, out_hw, E=None):
         if F0.shape != T.shape or int(F0.shape[1]) != 32:
             raise SystemExit('expected F0/T [B,32,H/2,W/2], got %s %s'
                              % (tuple(F0.shape), tuple(T.shape)))
-        u = torch.cat([F0, T, F0 - T], dim=1)
+        parts = [F0, T, F0 - T]
+        if E is not None:
+            if E.shape[0] != F0.shape[0] or E.shape[-2:] != F0.shape[-2:]:
+                raise SystemExit('E spatial mismatch: E=%s F0=%s'
+                                 % (tuple(E.shape), tuple(F0.shape)))
+            parts.append(E)
+        u = torch.cat(parts, dim=1)
+        if int(u.shape[1]) != self.in_ch:
+            raise SystemExit('in_ch=%d but cat channels=%d'
+                             % (self.in_ch, int(u.shape[1])))
         h = self.stem(u)
         h = F.interpolate(h, size=tuple(out_hw), mode='bilinear',
                           align_corners=False)
