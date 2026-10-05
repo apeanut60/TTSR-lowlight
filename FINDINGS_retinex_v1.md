@@ -2239,3 +2239,66 @@ mean/correct/dark 强，但 mismatch 塌回 Base，large-harm 0.359→0.438。ze
 1. A0 再次复现 B0。  
 2. 全局颜色统计能解释 B0 低频残差的一部分（low_frac 0.86→0.93），但 **无 reliability 条件时复现 B1 错配放大**。  
 3. 关闭 RGB-output 端再堆 conditioning；下一步 B4 feature-level residual。 Official Test 仍禁。
+
+## 49. V3-B.4.0：H/2 decoder feature residual（A0 RGB vs A1 ΔF_h2）
+
+> 完整报告：`/root/data/experiments/v3b4_feature_residual/findings_v3b4.md`  
+> 日期：2026-10-05；唯一变量=RGB residual vs frozen decoder H/2；`[F0,T,F0-T]` 相同；无 B1/B2/B3/H/4；无 Test
+
+### 49.1 判定：**V3B4_CASE_D_HARM**（正式 @20k）
+
+| | Base | old B0 | A0 RGB | A1 H/2 | A1−A0 |
+|---|---:|---:|---:|---:|---:|
+| correct | 19.699 | 20.184 | 20.184 | 20.132 | **−0.052** |
+| dark | 19.699 | 20.140 | 20.140 | 20.088 | **−0.051** |
+| mismatch | 19.699 | 20.010 | 20.010 | 20.025 | +0.014 |
+| mean | 19.699 | 20.111 | **20.111** | **20.082** | **−0.030** |
+
+correct/dark 亏；mismatch 微正；large-harm mismatch 0.359→0.391。A1 normal−self **+0.010**（ignored）。  
+HARD bridge max_abs=0。A0 复现 B0。10k A1−A0=+0.010，**不以 10k 改判**。  
+**next = `h2_injection_fail_no_h4`。禁止 B4.1，禁止回 H/4。**
+
+### 49.2 含义
+
+1. 同一 matcher 特征改在 H/2 注入，不如 RGB residual head。  
+2. Adapter 在学（zero-T −0.413；r_F≈0.75），但正确 T vs self 几乎无差，不算 reference success。  
+3. B0 仍为 incumbent。Official Test 仍禁。
+
+## 50. V3-B.4.1：Base-conditioned H/2（中断，无正式 verdict）
+
+> 完整报告：`/root/data/experiments/v3b41_base_conditioned_h2/findings_v3b41.md`  
+> 日期：2026-10-05；唯一变量=是否把 `F_dec_h2` 送进 adapter（176ch）；closure 相对 B4.0 blind；用户中断
+
+### 50.1 状态：**INCOMPLETE**（停于 A0 ≈14.1k；A1 未训）
+
+| | Base | old B0@20k | blind H/2@20k | A0@3k | A0@10k | A1 |
+|---|---:|---:|---:|---:|---:|---|
+| mean | 19.699 | 20.111 | 20.082 | 20.017 | 20.123 | — |
+
+A0 3k/10k 与历史 replay 一致。A1 n=184528；bridge HARD max_abs=0；smoke OK。  
+**无** `A1−A0` / conditioning ablation / Case 判定。不改写 §49；不关闭 feature route。  
+续跑须 A0 从 0→20k（禁 resume）再训 A1。B0 仍为 incumbent。
+
+## 51. V4.0：Ref-as-canvas direction reversal（A0 Y0 vs A1 R）
+
+> 完整报告：`/root/data/experiments/v4_ref_canvas/findings_v4.md`  
+> 日期：2026-10-05；同一 96ch head；A0=`Y0+Δ(F0,T_ref)`；A1=`R+Δ(FR,T_low)`；无 Test
+
+### 51.1 判定：**V4_CASE_D_BROAD_HARM**（正式 @20k）
+
+| | Base | Raw Ref | A0 | A1 | A1−A0 |
+|---|---:|---:|---:|---:|---:|
+| correct | 19.699 | 15.368 | 20.184 | 19.520 | **−0.664** |
+| dark | 19.699 | 10.542 | 20.140 | 19.266 | **−0.874** |
+| mismatch | 19.699 | 9.569 | 20.010 | 17.184 | **−2.827** |
+| mean | 19.699 | 11.827 | **20.111** | **18.656** | **−1.455** |
+
+A1−RawRef **+6.83**；normal−self **+6.77**（guidance 在用）。correct 仍低于 A0；mismatch LH 0.359→0.875。  
+Audit：correct 上 R 的 LPIPS 更好（0.281 vs 0.356），PSNR 差 4.33。正式点只认 PSNR。  
+**next = `stop_v4_ref_canvas`。禁止 V4.1。** B0 仍为 incumbent。
+
+### 51.2 含义
+
+1. 用 Y0 去纠 Ref **有效**，但 Ref 当 canvas 在 MSE-PSNR 下追不上从 Y0 出发。  
+2. 不是 Case C（unused）。低频 ΔR（low_frac≈0.98）补不了几何/对齐。  
+3. 不把 LPIPS audit 当成 A1 感知成功。Official Test 仍禁。
