@@ -53,6 +53,8 @@
 | §40 | V3-A.5E1b：Trained-Z Closure | ✅ **E1B_Z_IDENTITY_CONFIRMED**；far≈0.87 / held-out≈0.08 → redefine_target |
 | §41 | V3-A.6：Decision-Aligned Gate | ✅ **CASE_D_FAIL**；A1≈A0（Δ+0.005）；next=utility/selective_risk |
 | §42 | V3-A.7：GT utility accept/reject | ✅ **CASE_D_NO_GAIN**；block BCE vs MSE Δ@20k=−0.003 |
+| §51 | V4.0：Ref-as-canvas | ✅ **CASE_D_BROAD_HARM**；A1−A0=−1.455；next=stop_v4_ref_canvas |
+| §52 | V4.1a：Ground-then-transfer | ✅ **CASE_C_NULL**；A1−B0=+0.000；next=drop_RefGrounder |
 
 ## 0.1 摘要（截至 §17；V3-A 系列见 §31）
 
@@ -2301,4 +2303,29 @@ Audit：correct 上 R 的 LPIPS 更好（0.281 vs 0.356），PSNR 差 4.33。正
 
 1. 用 Y0 去纠 Ref **有效**，但 Ref 当 canvas 在 MSE-PSNR 下追不上从 Y0 出发。  
 2. 不是 Case C（unused）。低频 ΔR（low_frac≈0.98）补不了几何/对齐。  
-3. 不把 LPIPS audit 当成 A1 感知成功。Official Test 仍禁。
+3. 不把 LPIPS audit 当成 A1 感知成功。Official Test 仍禁。  
+4. 本条禁止的是 **Ref-canvas skip / MASA / gate**。另开的 Y0-canvas Grounder 见 §52。
+
+## 52. V4.1a：Ground-then-transfer（冻 B0；只训 RefGrounder）
+
+> 完整报告：`/root/data/experiments/v41_ground_then_transfer/findings_v41.md`  
+> 日期：2026-10-05；`T_low=Match(FR,F0)` → ΔFR → `FR*` → 可导 `Match(F0,FR*)` → frozen B0；无 Test
+
+### 52.1 判定：**V41_CASE_C_NULL**（正式 @20k）
+
+| | Base | Raw Ref | Frozen B0 | A1 | A1−B0 |
+|---|---:|---:|---:|---:|---:|
+| correct | 19.699 | 15.368 | 20.184 | 20.183 | **−0.001** |
+| dark | 19.699 | 10.542 | 20.140 | 20.140 | **+0.001** |
+| mismatch | 19.699 | 9.569 | 20.010 | 20.012 | **+0.001** |
+| mean | 19.699 | 11.827 | **20.111** | **20.112** | **+0.000** |
+
+`|mean Δ|<0.02`；mismatch LH 仍 0.359。normal−self **+0.011** / normal−shuffled **+0.005**（grounding 弱）。  
+3k +0.013、10k +0.011，**20k 收回**；不以中间点改判。step0 dY=dT=0；grad 穿过冻结 matcher。  
+**next = `drop_RefGrounder`。禁止 V4.1b。** B0 仍为 incumbent。
+
+### 52.2 含义
+
+1. Grounder 有非零 ΔFR（r_R≈0.54；d_after>d_before，未塌成 F0），但冻 B0 的 PSNR 当它不存在。  
+2. 与 V4.0 对照：reverse match **纠 Ref 有效**；把纠过的 FR 送回 **已训死的 Y0-canvas B0** **无效**。  
+3. 关闭 target-grounded FR rectification。不 unfreeze B0 / LPIPS / MASA / Test。
