@@ -10,6 +10,7 @@ from __future__ import annotations
 import torch
 import torch.nn.functional as F
 
+from model.RetinexRefMainNet import RetinexRefMainNet
 from model.V3BFeatureBridge import (
     BASE_H2_CH, TILE_OVERLAP, TILE_SIZE, _feather, _pad_to_4, decode_from_h2,
     original_base_forward, tiled_bridge_decode,
@@ -19,6 +20,46 @@ from trainer import tile_starts
 INJECTION_POINT = 'decoder_h4_bottleneck_then_h2_block0'
 BASE_H4_CH = 160
 REFINE_SCALES = ('H/4', 'H/2')
+
+
+def load_frozen_retinex_mainnet(base_ckpt, base_run_dir, device='cuda'):
+    """Load only Retinexformer MainNet. No LTE / VGG19 / Trainer.
+
+    V5 never uses TTSR texture transfer or perceptual VGG. The old
+    ``load_frozen_n0`` helper constructed TTSREnhance (LTE inits from
+    torchvision VGG19) and Trainer (a second VGG19 for unused loss).
+    """
+    from local_refine_runtime import load_args_from_run
+
+    cfg = load_args_from_run(base_run_dir)
+    n_blocks = [int(x) for x in
+                str(getattr(cfg, 'retinex_num_blocks', '1,2,2')).split(',')]
+    net = RetinexRefMainNet(
+        n_feat=getattr(cfg, 'retinex_n_feat', 40),
+        num_blocks=n_blocks,
+        ref_illum_pool=getattr(cfg, 'ref_illum_pool', 8),
+        use_global_illum=False)
+    blob = torch.load(base_ckpt, map_location='cpu')
+    msd = net.state_dict()
+    loaded = 0
+    missing = []
+    for k in msd:
+        pk = 'MainNet.' + k
+        if pk in blob and tuple(blob[pk].shape) == tuple(msd[k].shape):
+            msd[k] = blob[pk]
+            loaded += 1
+        elif k.startswith('estimator.') or k.startswith('denoiser.'):
+            missing.append(k)
+    if missing:
+        raise SystemExit('frozen MainNet missing %d keys (first %s)'
+                         % (len(missing), missing[:6]))
+    net.load_state_dict(msd, strict=True)
+    net.to(device).eval()
+    for p in net.parameters():
+        p.requires_grad_(False)
+    print('[V5] loaded %d MainNet tensors from %s (no VGG/LTE)'
+          % (loaded, base_ckpt), flush=True)
+    return net
 
 
 def prefix_to_h4(mainnet, x_m11):

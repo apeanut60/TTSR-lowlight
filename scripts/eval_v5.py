@@ -12,11 +12,11 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 _CLI = sys.argv[1:]
 sys.argv = [sys.argv[0]]
 
-from local_refine_runtime import (EVAL_QUERY_CHUNK, load_frozen_n0,     # noqa: E402
-                                  metrics as _metrics)
+from local_refine_runtime import EVAL_QUERY_CHUNK, metrics as _metrics  # noqa: E402
 from model.V3BResidualFusion import V3B0ResidualFusion                  # noqa: E402
 from model.V5Model import V5Model                                       # noqa: E402
-from model.V5RetinexBridge import INJECTION_POINT, tiled_v5_forward     # noqa: E402
+from model.V5RetinexBridge import (INJECTION_POINT, load_frozen_retinex_mainnet,  # noqa: E402
+                                   tiled_v5_forward)
 from option import parser as option_parser                              # noqa: E402
 from v3a5_pipeline import load_proposal, load_rows, make_dataset, sample_tensors  # noqa: E402
 from v3a5_runtime import STATES                                         # noqa: E402
@@ -80,11 +80,8 @@ def main():
     if bad:
         raise SystemExit('eval live artifact SHA fail: %s' % bad)
 
-    n0, trainer, _cfg = load_frozen_n0(
+    mainnet = load_frozen_retinex_mainnet(
         lock['base_ckpt'], lock['base_run_dir'], a.device)
-    mainnet = n0.MainNet.eval()
-    for p in mainnet.parameters():
-        p.requires_grad_(False)
 
     wrapper = load_proposal(lock['proposal_ckpt'], a.device)
     core = proposal_core(wrapper)

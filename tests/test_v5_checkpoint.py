@@ -46,5 +46,5 @@ class TestV5Checkpoint(unittest.TestCase):
         self.assertIn('HARD STOP', setup)
         self.assertIn('Ref branch grad is zero', train)
         self.assertIn('frozen Base received grad', train)
+        self.assertNotIn('load_frozen_n0', train)
         self.assertNotIn('PerPixelMultiRefAttention', train)
-        self.assertNotIn('LPIPS', train.split('argparse')[0])

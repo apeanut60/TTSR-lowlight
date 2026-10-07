@@ -55,6 +55,7 @@
 | §42 | V3-A.7：GT utility accept/reject | ✅ **CASE_D_NO_GAIN**；block BCE vs MSE Δ@20k=−0.003 |
 | §51 | V4.0：Ref-as-canvas | ✅ **CASE_D_BROAD_HARM**；A1−A0=−1.455；next=stop_v4_ref_canvas |
 | §52 | V4.1a：Ground-then-transfer | ✅ **CASE_C_NULL**；A1−B0=+0.000；next=drop_RefGrounder |
+| §53 | V5.0：Aligned Ref texture refine | ✅ **CASE_E_UNSAFE**；mean+0.334 但 LH↑/p10≈−4/Ref 反号；next=close_no_gate_patch |
 
 ## 0.1 摘要（截至 §17；V3-A 系列见 §31）
 
@@ -2329,3 +2330,47 @@ Audit：correct 上 R 的 LPIPS 更好（0.281 vs 0.356），PSNR 差 4.33。正
 1. Grounder 有非零 ΔFR（r_R≈0.54；d_after>d_before，未塌成 F0），但冻 B0 的 PSNR 当它不存在。  
 2. 与 V4.0 对照：reverse match **纠 Ref 有效**；把纠过的 FR 送回 **已训死的 Y0-canvas B0** **无效**。  
 3. 关闭 target-grounded FR rectification。不 unfreeze B0 / LPIPS / MASA / Test。
+
+## 53. V5.0：Aligned reference texture refinement（冻 Base；显式对齐）
+
+> 完整报告：`/root/data/experiments/v5_aligned_ref/findings_v5.md`  
+> 日期：2026-10-06/07；Match+Texture+warp/DCN+H/4→H/2 refine；MSE；正式 @30k；无 Test 改判
+
+### 53.1 判定：**V5_CASE_E_UNSAFE**（正式 @30k）
+
+| | Base | Frozen B0 | V5 | V5−B0 |
+|---|---:|---:|---:|---:|
+| correct | 19.699 | 20.184 | 20.401 | **+0.217** |
+| dark | 19.699 | 20.140 | 20.501 | **+0.361** |
+| mismatch | 19.699 | 20.010 | 20.435 | **+0.425** |
+| mean | 19.699 | **20.111** | **20.446** | **+0.334** |
+
+mean 过 +0.10，但 mismatch LH 0.359→**0.422**；逐图 V5−B0 p10≈**−4.0**；  
+normal Ref **差于** self/zero/shuf（20.446 vs 20.48–20.52）。LPIPS 0.344→0.292（更好，不改判）。  
+3k/10k 为负；**只认 30k**。  
+**next = `close_no_gate_patch`。禁止 V5.1 / gate / decoder unfreeze。** B0 仍为 incumbent。
+
+Official Test（附加 n=100）：Base 18.08 / B0 17.65 / V5 17.68（PSNR）；V5−Base **−0.40**。不翻案。
+
+### 53.2 含义
+
+1. 对齐在动（disp≈30、r_D2≈5.3），不是 unused；但 Ref 依赖反号 → 学成“反 Nano”用法。  
+2. 均值 PSNR 掩盖双峰：一半大涨、一半崩（p10≈−4）。  
+3. 与 B1/B3 同类失败：不做 gate 补救。关闭本路线 GO。
+
+## 54. 诊断：官方 RetinexFormer 权重热替换（B0 / V5 head 不重训）
+
+> 完整：`/root/data/experiments/v5_aligned_ref/findings_v5.md` §8  
+> 日期：2026-10-07；`LOL_v2_real.pth` → MainNet 122/122；Official Test n=100；不改 Case
+
+| method | PSNR | SSIM | LPIPS↓ |
+|---|---:|---:|---:|
+| Base_ours | 18.078 | 0.849 | 0.224 |
+| Base_official | **20.707** | **0.882** | **0.182** |
+| B0 @ our / @ official | 17.654 / **20.163** | 0.844 / 0.864 | 0.238 / 0.221 |
+| V5@30k @ our / @ official | 17.677 / **16.870** | 0.853 / **0.445** | 0.230 / **0.614** |
+
+- 官方 Base − 我们的 Base：**+2.63** PSNR。  
+- B0 挂官方 Y0：**+2.51** vs 自身 our 臂，但仍低于纯官方 Base（−0.55）。  
+- V5 挂官方 MainNet：**崩溃**（SSIM 0.45）——特征域注入不可热插拔。  
+- **不改** V5 Case E；B0 仍为 incumbent。若要用官方 Base，需重做 Y0 + 重训 head（本条不授权开训）。

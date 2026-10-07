@@ -13,9 +13,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 _CLI = sys.argv[1:]
 sys.argv = [sys.argv[0]]
 
-from local_refine_runtime import load_frozen_n0                             # noqa: E402
 from model.V5Model import V5Model                                           # noqa: E402
-from model.V5RetinexBridge import INJECTION_POINT, tiled_v5_forward         # noqa: E402
+from model.V5RetinexBridge import (INJECTION_POINT, load_frozen_retinex_mainnet,  # noqa: E402
+                                   tiled_v5_forward)
 from option import parser as option_parser                                  # noqa: E402
 from v3a5_pipeline import load_rows, make_dataset, sample_tensors           # noqa: E402
 from v3a5_runtime import STATES, bit_equal, snapshot_, state_dict_sha       # noqa: E402
@@ -117,12 +117,8 @@ def main():
                               key='%s|%s' % (row[0], state)))
     log('V5.0 train %s  pairs=%d  updates=%d' % (ARM_A1, len(pairs), a.updates))
 
-    n0, _trainer, _cfg = load_frozen_n0(
+    mainnet = load_frozen_retinex_mainnet(
         lock['base_ckpt'], lock['base_run_dir'], a.device)
-    mainnet = n0.MainNet
-    for p in mainnet.parameters():
-        p.requires_grad_(False)
-    mainnet.eval()
     snap_base = snapshot_(mainnet)
 
     model = V5Model().to(a.device)

@@ -12,9 +12,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 _CLI = sys.argv[1:]
 sys.argv = [sys.argv[0]]
 
-from local_refine_runtime import load_frozen_n0                         # noqa: E402
 from model.V5Model import V5Model                                       # noqa: E402
-from model.V5RetinexBridge import INJECTION_POINT, tiled_v5_forward     # noqa: E402
+from model.V5RetinexBridge import (INJECTION_POINT, load_frozen_retinex_mainnet,  # noqa: E402
+                                   tiled_v5_forward)
 from option import parser as option_parser                              # noqa: E402
 from v3a5_pipeline import load_rows, make_dataset, sample_tensors       # noqa: E402
 from v3a5_runtime import STATES                                         # noqa: E402
@@ -45,8 +45,8 @@ def main():
         repo_commit=lock['repo_commit'], injection_point=INJECTION_POINT)
     model = V5Model().to(a.device).eval()
     model.load_state_dict(blob['model'], strict=True)
-    n0, _tr, _cfg = load_frozen_n0(lock['base_ckpt'], lock['base_run_dir'], a.device)
-    mainnet = n0.MainNet.eval()
+    mainnet = load_frozen_retinex_mainnet(
+        lock['base_ckpt'], lock['base_run_dir'], a.device)
     ns = option_parser.parse_args([])
     ns.dataset_dir = a.data_dir
     ns.v3a_ref_variant = lock['reference_variant']

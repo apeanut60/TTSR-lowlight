@@ -12,11 +12,11 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 _CLI = sys.argv[1:]
 sys.argv = [sys.argv[0]]
 
-from local_refine_runtime import infer_n0, load_frozen_n0, metrics as _metrics  # noqa: E402
+from local_refine_runtime import metrics as _metrics                        # noqa: E402
 from model.V3BResidualFusion import count_params                            # noqa: E402
 from model.V5Model import V5Model, v5_step0_deltas_zero                     # noqa: E402
-from model.V5RetinexBridge import (INJECTION_POINT, bridge_zero_delta,      # noqa: E402
-                                   tiled_v5_forward)
+from model.V5RetinexBridge import (INJECTION_POINT, load_frozen_retinex_mainnet,  # noqa: E402
+                                   tiled_bridge_decode, tiled_v5_forward)
 from option import parser as option_parser                                  # noqa: E402
 from v3a5_pipeline import load_rows, make_dataset, sample_tensors           # noqa: E402
 from v3a5_runtime import snapshot_, state_dict_sha                          # noqa: E402
@@ -33,29 +33,22 @@ CHECK_N = 8
 ABS_TOL = 1e-6
 
 
-def _check(n0, trainer, branch, ds, indices, device, tag):
-    main = n0.MainNet
-    worst_base = 0.0
+def _check(main, branch, ds, indices, device, tag):
     worst_v5 = 0.0
     with torch.no_grad():
         for i in indices:
             t = sample_tensors(ds, int(i), 'correct', device)
-            y_base = infer_n0(n0, trainer, t['X'])
-            y_br = bridge_zero_delta(main, t['X']) if (
-                t['X'].shape[-2] <= 256 and t['X'].shape[-1] <= 256
-            ) else None
+            y_base = tiled_bridge_decode(main, t['X'], delta_fn=None)
             y_v5 = tiled_v5_forward(main, branch, t['X'], t['Y0'], t['R'])
             db = float((y_base - y_v5).abs().max())
             worst_v5 = max(worst_v5, db)
-            if y_br is not None:
-                worst_base = max(worst_base, float((y_base - y_br).abs().max()))
             p0 = float(_metrics(y_base, t['H'])[0])
             p1 = float(_metrics(y_v5, t['H'])[0])
             if db > ABS_TOL or abs(p0 - p1) > ABS_TOL:
                 raise SystemExit(
                     'HARD STOP step0 %s[%d] %s: dY=%.3e dPSNR=%.3e'
                     % (tag, i, t['name'], db, abs(p0 - p1)))
-    return worst_base, worst_v5
+    return worst_v5
 
 
 def main():
@@ -92,12 +85,8 @@ def main():
     torch.save(dict(model=sd, arm=ARM_A1, injection_point=INJECTION_POINT),
                init_path)
 
-    print('=== loading frozen Base ===', flush=True)
-    n0, trainer, _cfg = load_frozen_n0(base_ckpt, base_run, a.device)
-    mainnet = n0.MainNet
-    for p in mainnet.parameters():
-        p.requires_grad_(False)
-    mainnet.eval()
+    print('=== loading frozen Retinexformer MainNet (no VGG/LTE) ===', flush=True)
+    mainnet = load_frozen_retinex_mainnet(base_ckpt, base_run, a.device)
     model.to(a.device).eval()
 
     ns = option_parser.parse_args([])
@@ -117,10 +106,10 @@ def main():
                      'refiner_train'), mmap_dv)
 
     print('=== step0 V5 vs Base train8 ===', flush=True)
-    wbt, wvt = _check(n0, trainer, model, ds_tr, range(CHECK_N), a.device, 'train')
+    wvt = _check(mainnet, model, ds_tr, range(CHECK_N), a.device, 'train')
     print('  worst d(Base,V5)=%.3e' % wvt, flush=True)
     print('=== step0 V5 vs Base dev8 ===', flush=True)
-    wbd, wvd = _check(n0, trainer, model, ds_dv, range(CHECK_N), a.device, 'dev')
+    wvd = _check(mainnet, model, ds_dv, range(CHECK_N), a.device, 'dev')
     print('  worst d(Base,V5)=%.3e' % wvd, flush=True)
 
     # official_test_allowed=False is required in lock_architecture_fields()
