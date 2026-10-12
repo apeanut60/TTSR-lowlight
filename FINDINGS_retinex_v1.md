@@ -2374,3 +2374,17 @@ Official Test（附加 n=100）：Base 18.08 / B0 17.65 / V5 17.68（PSNR）；V
 - B0 挂官方 Y0：**+2.51** vs 自身 our 臂，但仍低于纯官方 Base（−0.55）。  
 - V5 挂官方 MainNet：**崩溃**（SSIM 0.45）——特征域注入不可热插拔。  
 - **不改** V5 Case E；B0 仍为 incumbent。若要用官方 Base，需重做 Y0 + 重训 head（本条不授权开训）。
+
+## 55. V6.0：V5 结构移植到冻 LLFormer Base（提前停 @~1.3k）
+
+> 完整：`/root/data/experiments/v6_llformer_aligned_ref/findings_v6.md`  
+> 日期：2026-10-08；Y0=LLFormer E110；Nano-v2；MSE；非正式 30k（停于 1k ckpt）
+
+| | Base | V6@1k | Δ |
+|---|---:|---:|---:|
+| dev64 mean PSNR | 22.858 | 22.995 | **+0.137** |
+| Official Test PSNR | **26.077** | 25.588 | **−0.489** |
+
+- Ref ablation：normal≈self≈zero≈shuf → **Ref 未用**。  
+- mismatch LH 0→0.438；p10≈−1.57。loss 平台。  
+- 与 V5 Case E 同族。**关闭本移植 GO**；不续 30k；incumbent=LLFormer E110（无 Ref）。
