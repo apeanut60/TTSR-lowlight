@@ -1,0 +1,116 @@
+{
+  "gate": "G2.1_window_layout_fix",
+  "baseline_commit": "3aa86222af2af4d17d95b13beb6975427706b4d9",
+  "actual_commit": "e597d47648d72b34ad2781b4140d6e9c7e02e3a0",
+  "architecture": "V7_river_attn_fusion_win3_d2only_v1",
+  "spatial_window": 3,
+  "n_keys": 9,
+  "d1_enabled": false,
+  "identity_flow": false,
+  "states": [
+    "correct"
+  ],
+  "setting": "A_fusion_only",
+  "frozen_llformer": true,
+  "frozen_alignment": true,
+  "n_images": 8,
+  "updates": 200,
+  "lr": 0.0001,
+  "seed": 42,
+  "optimizer": "Adam",
+  "loss": "MSE",
+  "old_win3_json": "/root/data/experiments/V7_CODE_REVIEW_FIX/G2_window_microset_win3.json",
+  "fix": "V7RiverFusion._window_kv: reshape(B,C,K*K,HW).permute(0,3,2,1)",
+  "qk_grad_n1": {
+    "spatial_window": 1,
+    "n_keys": 1,
+    "q_grad": 0.0,
+    "k_grad": 0.0,
+    "v_grad": 2543.8116760253906
+  },
+  "qk_grad_win3": {
+    "spatial_window": 3,
+    "n_keys": 9,
+    "q_grad": 693.9379119873047,
+    "k_grad": 457.14862537384033,
+    "v_grad": 2279.7372512817383
+  },
+  "qk_fixed": true,
+  "v7_init_path": "/root/data/experiments/V7_RIVER_validation/experiments/A_fusion_only/init/v7_river_s42.pt",
+  "base_ckpt": "/root/data/experiments/llformer_lolv2real/canonical/llformer_lolv2real_base_E110.pth",
+  "image_names": [
+    "low00001.png",
+    "low00002.png",
+    "low00003.png",
+    "low00004.png",
+    "low00005.png",
+    "low00006.png",
+    "low00007.png",
+    "low00009.png"
+  ],
+  "load_missing": [],
+  "load_unexpected": [],
+  "step0_max_abs": 0.0,
+  "loss_first": 0.015102533623576164,
+  "loss_last": 0.004451568238437176,
+  "loss_min": 0.004451568238437176,
+  "overfit_ok": true,
+  "ckpt": "/root/data/experiments/V7_CODE_REVIEW_FIX/gate2_1/ckpt_microset_win3_fixed.pt",
+  "qk_grad_after_train": {
+    "q": 1.9469040637432045e-06,
+    "k": 5.750097272994026e-06,
+    "v": 0.014414174715057015
+  },
+  "microset": {
+    "n": 8,
+    "loss_mean": 0.010242210875730962,
+    "mae_y_swapA2_mean": 0.0006099919082771521,
+    "mae_y_shuffleRef_mean": 0.0002030330128945934,
+    "dpsnr_normal_minus_shuffle_mean": 0.0011583746404983941
+  },
+  "dev_image_names": [
+    "low00010.png",
+    "low00011.png",
+    "low00012.png",
+    "low00014.png",
+    "low00015.png",
+    "low00016.png",
+    "low00017.png",
+    "low00018.png",
+    "low00019.png",
+    "low00020.png",
+    "low00021.png",
+    "low00022.png",
+    "low00023.png",
+    "low00024.png",
+    "low00025.png",
+    "low00026.png"
+  ],
+  "dev": {
+    "n": 16,
+    "loss_mean": 0.015260739979567006,
+    "mae_y_swapA2_mean": 0.0005369882765080547,
+    "mae_y_shuffleRef_mean": 0.00020123476383560046,
+    "dpsnr_normal_minus_shuffle_mean": 0.0021134564188654004
+  },
+  "old_win3": {
+    "loss_first": 0.015102533623576164,
+    "loss_last": 0.004538813605904579,
+    "mae_y_swapA2_mean": 0.0004904917841486167,
+    "mae_y_shuffleRef_mean": 0.00016313806008838583,
+    "dpsnr_normal_minus_shuffle_mean": 0.0007112842231222771,
+    "fusion_responds": false,
+    "gate2_pass": false
+  },
+  "delta_vs_old_micro": {
+    "loss_last": -8.724536746740341e-05,
+    "mae_swapA2": 0.00011950012412853539,
+    "mae_shuffleRef": 3.9894952806207584e-05,
+    "dpsnr": 0.000447090417376117
+  },
+  "fusion_responds": false,
+  "improved_vs_old": false,
+  "qk_live_ok": true,
+  "gate2_1_pass": false,
+  "repro_commands": "# unit tests\ncd /root/projects/TTSR-lowlight && /root/miniconda3/envs/ttsr/bin/python -m unittest tests.test_v7_river -v\n# microset + heldout eval (writes under /root/data/experiments/V7_CODE_REVIEW_FIX/)\n/root/miniconda3/envs/ttsr/bin/python /root/projects/TTSR-lowlight/scripts/gate2_1_window_layout_fix.py --device cuda\n"
+}

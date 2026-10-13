@@ -1,0 +1,60 @@
+{
+  "architecture": "V7_river_attn_fusion_win3_d2only_v1",
+  "spatial_window": 3,
+  "n_keys": 9,
+  "d1_enabled": false,
+  "states": [
+    "correct"
+  ],
+  "setting": "A_fusion_only",
+  "n_images": 8,
+  "updates": 200,
+  "lr": 0.0001,
+  "seed": 42,
+  "qk_grad_n1": {
+    "spatial_window": 1,
+    "n_keys": 1,
+    "q_grad": 0.0,
+    "k_grad": 0.0,
+    "v_grad": 2543.8116760253906
+  },
+  "qk_grad_win3": {
+    "spatial_window": 3,
+    "n_keys": 9,
+    "q_grad": 657.431640625,
+    "k_grad": 434.15736293792725,
+    "v_grad": 773.4341697692871
+  },
+  "qk_fixed": true,
+  "v7_init_path": "/root/data/experiments/V7_RIVER_validation/experiments/A_fusion_only/init/v7_river_s42.pt",
+  "base_ckpt": "/root/data/experiments/llformer_lolv2real/canonical/llformer_lolv2real_base_E110.pth",
+  "load_missing": [],
+  "load_unexpected": [],
+  "image_names": [
+    "low00001.png",
+    "low00002.png",
+    "low00003.png",
+    "low00004.png",
+    "low00005.png",
+    "low00006.png",
+    "low00007.png",
+    "low00009.png"
+  ],
+  "step0_max_abs": 0.0,
+  "loss_first": 0.015102533623576164,
+  "loss_last": 0.004538813605904579,
+  "loss_min": 0.004538813605904579,
+  "overfit_ok": true,
+  "mae_y_swapA2_mean": 0.0004904917841486167,
+  "mae_y_shuffleRef_mean": 0.00016313806008838583,
+  "dpsnr_normal_minus_shuffle_mean": 0.0007112842231222771,
+  "qk_grad_after_train": {
+    "q": 0.0005155863691470586,
+    "k": 0.00019924088519474026,
+    "v": 0.011211669771000743
+  },
+  "fusion_responds": false,
+  "qk_live_ok": true,
+  "gate2_pass": false,
+  "ckpt": "/root/data/experiments/V7_CODE_REVIEW_FIX/gate2/ckpt_microset_last.pt"
+}
