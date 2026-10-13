@@ -1,0 +1,201 @@
+{
+  "gate": "G2.3a_c2_geometry_fix",
+  "actual_commit": "7155d20af37cad7f3ec1d0cddba869bce00865be",
+  "c2_sha256": "09609b61283680829ffcd59707b080abd901d4623f917ddc3ce35b37fe927b00",
+  "g23_retraction": {
+    "retracted_test": "Gate2.3 absolute Flow==(dx,dy) on rolled Nano Ref",
+    "reason": "Nano Ref is not guaranteed pixel-aligned to Y0; absolute expected flow after roll is not identified",
+    "prior_geometric_match_ok": false
+  },
+  "flow_convention": {
+    "matcher": "flow_x=sx-tx, flow_y=sy-ty (source-target)",
+    "warp": "samples source at (x+dx,y+dy)",
+    "roll_expectation": "torch.roll(key,+dy,+dx) \u21d2 expected flow \u2248 (+dx_feat,+dy_feat) on interior"
+  },
+  "task1_y0_shift": {
+    "microset": {
+      "n": 8,
+      "flow_err_mean": 0.023336875674431212,
+      "flow_err_median": 0.0,
+      "acc_within_1px": 0.9994661957025528,
+      "acc_within_2px": 0.9995411187410355,
+      "mean_flow_dx": 2.9911971390247345,
+      "mean_flow_dy": 1.992798462510109,
+      "exp_dx_feat": 3.0,
+      "exp_dy_feat": 2.0,
+      "frac_sign_dx_ok": 1.0,
+      "frac_sign_dy_ok": 1.0,
+      "positive_control_pass": true,
+      "flow_definition": {
+        "matcher": "flow_x=sx-tx, flow_y=sy-ty (source-target)",
+        "warp": "samples source at (x+dx,y+dy)",
+        "roll_expectation": "torch.roll(key,+dy,+dx) \u21d2 expected flow \u2248 (+dx_feat,+dy_feat) on interior"
+      }
+    },
+    "microset_heldout": {
+      "n": 16,
+      "flow_err_mean": 0.01265646763931727,
+      "flow_err_median": 0.0,
+      "acc_within_1px": 0.9997284077107906,
+      "acc_within_2px": 0.9997471384704113,
+      "mean_flow_dx": 2.9938098192214966,
+      "mean_flow_dy": 2.001699648797512,
+      "exp_dx_feat": 3.0,
+      "exp_dy_feat": 2.0,
+      "frac_sign_dx_ok": 1.0,
+      "frac_sign_dy_ok": 1.0,
+      "positive_control_pass": true,
+      "flow_definition": {
+        "matcher": "flow_x=sx-tx, flow_y=sy-ty (source-target)",
+        "warp": "samples source at (x+dx,y+dy)",
+        "roll_expectation": "torch.roll(key,+dy,+dx) \u21d2 expected flow \u2248 (+dx_feat,+dy_feat) on interior"
+      }
+    }
+  },
+  "task2_nano_relative": {
+    "microset": {
+      "n": 8,
+      "source_index_exact_acc": 0.9007972702383995,
+      "source_index_l1_mean": 9.23010540008545,
+      "delta_flow_err_median": 0.0,
+      "frac_delta_flow_within_2": 0.9021332561969757,
+      "relative_consistency_pass": true,
+      "note": "Does NOT assume base Nano flow is zero; tests that rolling the key shifts matched source indices by the same roll"
+    },
+    "microset_heldout": {
+      "n": 16,
+      "source_index_exact_acc": 0.874833419919014,
+      "source_index_l1_mean": 12.216341018676758,
+      "delta_flow_err_median": 0.0,
+      "frac_delta_flow_within_2": 0.8760081566870213,
+      "relative_consistency_pass": true,
+      "note": "Does NOT assume base Nano flow is zero; tests that rolling the key shifts matched source indices by the same roll"
+    }
+  },
+  "task3_identity_vs_c2": {
+    "microset": {
+      "n": 8,
+      "correct_delta_l1_id_minus_c2": -0.09002966247498989,
+      "correct_delta_gc_c2_minus_id": -0.8245441475883126,
+      "shuffle_delta_l1_id_minus_c2": -0.06444261316210032,
+      "shuffle_delta_gc_c2_minus_id": -0.48664851882494986,
+      "frac_c2_helps_correct_more": 0.0,
+      "c2_warp_useful_vs_identity": false
+    },
+    "microset_heldout": {
+      "n": 16,
+      "correct_delta_l1_id_minus_c2": -0.08575585344806314,
+      "correct_delta_gc_c2_minus_id": -0.8901399194801343,
+      "shuffle_delta_l1_id_minus_c2": -0.05805642902851105,
+      "shuffle_delta_gc_c2_minus_id": -0.5465688958820465,
+      "frac_c2_helps_correct_more": 0.1875,
+      "c2_warp_useful_vs_identity": false
+    }
+  },
+  "task4_split_audit": {
+    "microset_n": 8,
+    "microset_heldout_n": 16,
+    "train_n": 575,
+    "formal_dev_n": 64,
+    "train_prefix64_leak": {
+      "n_leak": 24,
+      "leak_ids": [
+        "low00001.png",
+        "low00002.png",
+        "low00003.png",
+        "low00004.png",
+        "low00005.png",
+        "low00006.png",
+        "low00007.png",
+        "low00009.png",
+        "low00010.png",
+        "low00011.png",
+        "low00012.png",
+        "low00014.png",
+        "low00015.png",
+        "low00016.png",
+        "low00017.png",
+        "low00018.png",
+        "low00019.png",
+        "low00020.png",
+        "low00021.png",
+        "low00022.png",
+        "low00023.png",
+        "low00024.png",
+        "low00025.png",
+        "low00026.png"
+      ],
+      "leak_heldout": [
+        "low00010.png",
+        "low00011.png",
+        "low00012.png",
+        "low00014.png",
+        "low00015.png",
+        "low00016.png",
+        "low00017.png",
+        "low00018.png",
+        "low00019.png",
+        "low00020.png",
+        "low00021.png",
+        "low00022.png",
+        "low00023.png",
+        "low00024.png",
+        "low00025.png",
+        "low00026.png"
+      ],
+      "leak_microset": [
+        "low00001.png",
+        "low00002.png",
+        "low00003.png",
+        "low00004.png",
+        "low00005.png",
+        "low00006.png",
+        "low00007.png",
+        "low00009.png"
+      ],
+      "unsafe": true,
+      "warning": "train[:64] overlaps microset and/or microset-heldout \u2014 FORBIDDEN as expand set"
+    },
+    "expand_pool_n": 551,
+    "formal_dev_overlap_heldout": [],
+    "formal_dev_overlap_microset": [],
+    "budget_suggestion": {
+      "updates": 400,
+      "n_images": 32,
+      "states": [
+        "correct"
+      ],
+      "d1_enabled": false,
+      "a2_mode": "tex_h4",
+      "freeze_llformer": true,
+      "freeze_align": true,
+      "setting": "A",
+      "seed": 42,
+      "lr": 0.0001,
+      "eval_on": [
+        "expand_train_subset",
+        "microset_heldout_16",
+        "formal_dev"
+      ],
+      "note": "Gate 2.4 bounded pilot proposal only: increase n with exclusive IDs; keep tex_h4; do NOT start here"
+    }
+  },
+  "exclusive_id_lists_path": "/root/data/experiments/V7_CODE_REVIEW_FIX/gate2_3a/exclusive_id_lists.json",
+  "c2_revised": {
+    "positive_control_ok": true,
+    "nano_relative_ok": true,
+    "c2_warp_vs_identity_useful": false,
+    "geometric_ready_for_c2_warp_pilot": false
+  },
+  "gate2_4_proposal": {
+    "type": "expand_microset_tex_h4_bounded_pilot",
+    "train_now": false,
+    "proposal": "C2 Y0-shift positive control PASS and Nano relative roll consistency PASS, but C2-warp worsens structure vs identity on Nano Correct (\u0394gc_c2\u2212id \u2248 \u22120.82). Do NOT wire C2-warp yet. Gate 2.4: single-variable expand exclusive n=32 tex_h4, updates\u2264400, eval microset-heldout + formal split.dev \u2014 proposal only, no train now.",
+    "rationale": {
+      "c2_matcher_geometry_ok": true,
+      "c2_warp_on_nano_hurts": true,
+      "prefer": "tex_h4_expand_before_c2_warp"
+    }
+  },
+  "train_authorization": "DENIED"
+}
