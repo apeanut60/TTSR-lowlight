@@ -63,6 +63,8 @@ def load_official_state_dict(path: str) -> OrderedDict:
     blob = torch.load(path, map_location='cpu')
     if isinstance(blob, dict) and 'state_dict' in blob:
         sd = blob['state_dict']
+    elif isinstance(blob, dict) and 'model' in blob:
+        sd = blob['model']
     else:
         sd = blob
     return strip_module_prefix(sd)

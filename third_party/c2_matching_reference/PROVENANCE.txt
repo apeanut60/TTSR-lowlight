@@ -1,0 +1,10 @@
+Original source: https://github.com/yumingj/C2-Matching
+Pinned revision: 6d60149e7fd04b94a4137bea16469e3eb8fbc620
+Paths:
+  mmsr/models/archs/contras_extractor_arch.py
+  mmsr/models/archs/ref_map_util.py
+License: repo LICENSE Apache License 2.0. Repo README refers to MIT; check upstream.
+Source authors: C2-Matching project (Yuming Jiang et al., CVPR 2021).
+The two source files are redistributed here AS-IS for research reference.
+These are NOT published source code of Task Decoupled (Huang et al., CVPR 2022).
+C2 matching pretrained weights are NOT included. Not standalone plug-and-play.
