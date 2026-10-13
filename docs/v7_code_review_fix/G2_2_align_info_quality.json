@@ -170,5 +170,6 @@
   },
   "per_image_csv": "/root/data/experiments/V7_CODE_REVIEW_FIX/gate2_2/per_image_psnr.csv",
   "gate2_2_pass": true,
-  "stop_reason": null
+  "stop_reason": null,
+  "report_commit": "d143f481f6ce93eaa808b8beb86167fe37201018"
 }
