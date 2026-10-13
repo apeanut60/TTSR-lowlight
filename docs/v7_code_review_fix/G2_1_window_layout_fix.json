@@ -112,5 +112,6 @@
   "improved_vs_old": false,
   "qk_live_ok": true,
   "gate2_1_pass": false,
-  "repro_commands": "# unit tests\ncd /root/projects/TTSR-lowlight && /root/miniconda3/envs/ttsr/bin/python -m unittest tests.test_v7_river -v\n# microset + heldout eval (writes under /root/data/experiments/V7_CODE_REVIEW_FIX/)\n/root/miniconda3/envs/ttsr/bin/python /root/projects/TTSR-lowlight/scripts/gate2_1_window_layout_fix.py --device cuda\n"
+  "repro_commands": "# unit tests\ncd /root/projects/TTSR-lowlight && /root/miniconda3/envs/ttsr/bin/python -m unittest tests.test_v7_river -v\n# microset + heldout eval (writes under /root/data/experiments/V7_CODE_REVIEW_FIX/)\n/root/miniconda3/envs/ttsr/bin/python /root/projects/TTSR-lowlight/scripts/gate2_1_window_layout_fix.py --device cuda\n",
+  "report_commit": "766435f45aa45e92926d1d51d9baa9a19ad6653c"
 }
