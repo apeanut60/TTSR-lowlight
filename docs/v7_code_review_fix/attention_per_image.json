@@ -1,0 +1,90 @@
+[
+  {
+    "n_keys": 9,
+    "entropy_mean": 2.197211503982544,
+    "entropy_uniform": 2.1972246170043945,
+    "entropy_frac_of_uniform": 0.9999940395355225,
+    "weight_max_mean": 0.11160150170326233,
+    "weight_max_p90": 0.11217102408409119,
+    "frac_argmax_center": 0.07257080078125,
+    "weight_center_mean": 0.11109708249568939,
+    "name": "low00001.png"
+  },
+  {
+    "n_keys": 9,
+    "entropy_mean": 2.197211742401123,
+    "entropy_uniform": 2.1972246170043945,
+    "entropy_frac_of_uniform": 0.999994158744812,
+    "weight_max_mean": 0.1116003468632698,
+    "weight_max_p90": 0.11217225342988968,
+    "frac_argmax_center": 0.07647705078125,
+    "weight_center_mean": 0.11109618097543716,
+    "name": "low00002.png"
+  },
+  {
+    "n_keys": 9,
+    "entropy_mean": 2.197218418121338,
+    "entropy_uniform": 2.1972246170043945,
+    "entropy_frac_of_uniform": 0.9999971985816956,
+    "weight_max_mean": 0.11144101619720459,
+    "weight_max_p90": 0.11184313893318176,
+    "frac_argmax_center": 0.07574462890625,
+    "weight_center_mean": 0.11111277341842651,
+    "name": "low00003.png"
+  },
+  {
+    "n_keys": 9,
+    "entropy_mean": 2.1972179412841797,
+    "entropy_uniform": 2.1972246170043945,
+    "entropy_frac_of_uniform": 0.9999969601631165,
+    "weight_max_mean": 0.11145642399787903,
+    "weight_max_p90": 0.11186486482620239,
+    "frac_argmax_center": 0.0750732421875,
+    "weight_center_mean": 0.11111259460449219,
+    "name": "low00004.png"
+  },
+  {
+    "n_keys": 9,
+    "entropy_mean": 2.1972084045410156,
+    "entropy_uniform": 2.1972246170043945,
+    "entropy_frac_of_uniform": 0.9999926090240479,
+    "weight_max_mean": 0.11163348704576492,
+    "weight_max_p90": 0.11209986358880997,
+    "frac_argmax_center": 0.07489013671875,
+    "weight_center_mean": 0.11110071837902069,
+    "name": "low00005.png"
+  },
+  {
+    "n_keys": 9,
+    "entropy_mean": 2.1972081661224365,
+    "entropy_uniform": 2.1972246170043945,
+    "entropy_frac_of_uniform": 0.9999925494194031,
+    "weight_max_mean": 0.11164475977420807,
+    "weight_max_p90": 0.11214904487133026,
+    "frac_argmax_center": 0.07757568359375,
+    "weight_center_mean": 0.1110987663269043,
+    "name": "low00006.png"
+  },
+  {
+    "n_keys": 9,
+    "entropy_mean": 2.1972169876098633,
+    "entropy_uniform": 2.1972246170043945,
+    "entropy_frac_of_uniform": 0.999996542930603,
+    "weight_max_mean": 0.11147338151931763,
+    "weight_max_p90": 0.11186593025922775,
+    "frac_argmax_center": 0.0750732421875,
+    "weight_center_mean": 0.11110444366931915,
+    "name": "low00007.png"
+  },
+  {
+    "n_keys": 9,
+    "entropy_mean": 2.1972131729125977,
+    "entropy_uniform": 2.1972246170043945,
+    "entropy_frac_of_uniform": 0.9999948143959045,
+    "weight_max_mean": 0.11147930473089218,
+    "weight_max_p90": 0.11206404119729996,
+    "frac_argmax_center": 0.0594482421875,
+    "weight_center_mean": 0.11110560595989227,
+    "name": "low00009.png"
+  }
+]

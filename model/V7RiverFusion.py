@@ -80,8 +80,8 @@ class V7RiverFusion(nn.Module):
                    .permute(0, 3, 2, 1).contiguous())
         return patches
 
-    def forward(self, base_feat: Tensor, aligned_ref: Tensor
-                ) -> Tuple[Tensor, Tensor]:
+    def forward(self, base_feat: Tensor, aligned_ref: Tensor,
+                return_attn: bool = False):
         if base_feat.shape[-2:] != aligned_ref.shape[-2:]:
             raise ValueError('spatial mismatch D %s vs A %s'
                              % (tuple(base_feat.shape), tuple(aligned_ref.shape)))
@@ -104,7 +104,8 @@ class V7RiverFusion(nn.Module):
             q_ = q.unsqueeze(3)
             scale = hd ** -0.5
             scores = (q_ * k).sum(-1) * scale  # [B,Nh,HW,1]
-            attn = torch.matmul(scores.softmax(-1).unsqueeze(-2), v).squeeze(3)
+            weights = scores.softmax(-1)
+            attn = torch.matmul(weights.unsqueeze(-2), v).squeeze(3)
         else:
             k_tok = self._window_kv(self.k_proj(y_ref))  # B,HW,N,C
             v_tok = self._window_kv(self.v_proj(y_ref))
@@ -114,14 +115,19 @@ class V7RiverFusion(nn.Module):
             q_ = q.unsqueeze(3)
             scale = hd ** -0.5
             scores = (q_ * k).sum(-1) * scale  # [B,Nh,HW,N]
-            attn = torch.matmul(scores.softmax(-1).unsqueeze(-2), v).squeeze(3)
+            weights = scores.softmax(-1)
+            attn = torch.matmul(weights.unsqueeze(-2), v).squeeze(3)
             # attn: [B,Nh,HW,Hd]
 
         y = attn.permute(0, 1, 3, 2).reshape(b, self.emb, h, w)
         y = self.fusion(torch.cat([x, y], dim=1))
         y = self.out_conv(y)
         delta = self.out_to_base(y)
-        return base_feat + delta, delta
+        out = (base_feat + delta, delta)
+        if not return_attn:
+            return out
+        # scores/weights: [B,Nh,HW,N]
+        return out[0], out[1], dict(scores=scores, weights=weights)
 
 
 def v7_fusion_step0_zero(module: V7RiverFusion) -> bool:

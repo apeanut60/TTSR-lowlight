@@ -1,0 +1,174 @@
+{
+  "gate": "G2.2_alignment_info_quality",
+  "g21_commit": "e597d47648d72b34ad2781b4140d6e9c7e02e3a0",
+  "actual_commit": "e5b068df0d9f7109d8abdf995b3b50d3cca96e8e",
+  "g21_ckpt": "/root/data/experiments/V7_CODE_REVIEW_FIX/gate2_1/ckpt_microset_win3_fixed.pt",
+  "base_ckpt": "/root/data/experiments/llformer_lolv2real/canonical/llformer_lolv2real_base_E110.pth",
+  "seed": 42,
+  "lr": 0.0001,
+  "updates": 200,
+  "n_microset": 8,
+  "optimizer": "Adam",
+  "loss": "MSE",
+  "microset_names": [
+    "low00001.png",
+    "low00002.png",
+    "low00003.png",
+    "low00004.png",
+    "low00005.png",
+    "low00006.png",
+    "low00007.png",
+    "low00009.png"
+  ],
+  "microset_heldout_names": [
+    "low00010.png",
+    "low00011.png",
+    "low00012.png",
+    "low00014.png",
+    "low00015.png",
+    "low00016.png",
+    "low00017.png",
+    "low00018.png",
+    "low00019.png",
+    "low00020.png",
+    "low00021.png",
+    "low00022.png",
+    "low00023.png",
+    "low00024.png",
+    "low00025.png",
+    "low00026.png"
+  ],
+  "note_heldout": "microset-heldout from train split (NOT formal split.dev); same protocol as G2.1 16-image set",
+  "g21_batch_eval": {
+    "batch_mse_init": 0.020378261455334723,
+    "batch_mse_g21": 0.010242210875730962,
+    "overfit_ok": true,
+    "bogus_step_loss_comparison": {
+      "old_loss_first": 0.015102533623576164,
+      "old_loss_last": 0.004451568238437176,
+      "old_overfit_ok_claim": true,
+      "note": "old compared per-step losses on different images; superseded"
+    },
+    "per_image_mse_init": [
+      0.015102533623576164,
+      0.012114427052438259,
+      0.04140053689479828,
+      0.034711480140686035,
+      0.015087529085576534,
+      0.01498983334749937,
+      0.02175597846508026,
+      0.00786377303302288
+    ],
+    "per_image_mse_g21": [
+      0.0095628397539258,
+      0.010149986483156681,
+      0.007865830324590206,
+      0.008556505665183067,
+      0.01317677740007639,
+      0.01583527773618698,
+      0.012353947386145592,
+      0.004436522256582975
+    ]
+  },
+  "g21_microset": {
+    "n": 8,
+    "psnr_base": 23.509875092837387,
+    "psnr_normal": 26.176356421722364,
+    "psnr_shuffle": 26.17519804708187,
+    "dpsnr_normal_minus_base": 2.6664813288849785,
+    "dpsnr_normal_minus_shuffle": 0.0011583746404983941,
+    "mae_y_swapA2": 0.0006099919082771521,
+    "mae_y_shuffleRef": 0.0002030330128945934,
+    "mse_normal": 0.010242210875730962
+  },
+  "g21_microset_heldout": {
+    "n": 16,
+    "psnr_base": 27.02396422565962,
+    "psnr_normal": 24.8676288287799,
+    "psnr_shuffle": 24.86551537236104,
+    "dpsnr_normal_minus_base": -2.1563353968797174,
+    "dpsnr_normal_minus_shuffle": 0.0021134564188654004,
+    "mae_y_swapA2": 0.0005369882765080547,
+    "mae_y_shuffleRef": 0.00020123476383560046,
+    "mse_normal": 0.015260739979567006
+  },
+  "attention_audit": {
+    "grad_g21": {
+      "q": 1.946904092164914e-06,
+      "k": 5.750097159307188e-06,
+      "v": 0.014414174249395728,
+      "out_conv": 0.09004115033894777
+    },
+    "param_delta_init_to_g21": {
+      "q": 0.10698240739293396,
+      "k": 0.14363672956824303,
+      "v": 0.948337409645319,
+      "out_conv": 0.5148268975317478,
+      "fusion": 1.9548586392775178
+    },
+    "param_norms": {
+      "q_init": 9.621666476130486,
+      "q_g21": 9.624577149748802,
+      "k_init": 9.621103182435036,
+      "k_g21": 9.62817756831646,
+      "v_init": 9.634676232933998,
+      "v_g21": 9.70436242222786
+    },
+    "mean_weight_max": 0.11154127772897482,
+    "mean_entropy_frac_of_uniform": 0.9999948590993881,
+    "uniform_weight": 0.1111111111111111,
+    "qk_param_updated": true,
+    "attention_selection_real": false,
+    "per_image_summary_n": 8
+  },
+  "attention_per_image_json": "/root/data/experiments/V7_CODE_REVIEW_FIX/gate2_2/attention_per_image.json",
+  "tex_h4_train": {
+    "batch_mse_0": 0.020378261455334723,
+    "batch_mse_200": 0.010078134364448488,
+    "overfit_batch_mse": true,
+    "per_image_mse_200": [
+      0.009617709554731846,
+      0.010032856836915016,
+      0.007393563631922007,
+      0.008098037913441658,
+      0.012861563824117184,
+      0.01599750481545925,
+      0.012389423325657845,
+      0.004234415013343096
+    ],
+    "ckpt": "/root/data/experiments/V7_CODE_REVIEW_FIX/gate2_2/ckpt_tex_h4_200.pt",
+    "step0_max_abs": 0.0
+  },
+  "tex_h4_microset": {
+    "n": 8,
+    "psnr_base": 23.509875092837387,
+    "psnr_normal": 26.274353266056835,
+    "psnr_shuffle": 25.998309059038785,
+    "dpsnr_normal_minus_base": 2.7644781732194477,
+    "dpsnr_normal_minus_shuffle": 0.2760442070180473,
+    "mae_y_swapA2": 0.004960259277140722,
+    "mae_y_shuffleRef": 0.010698268997657578,
+    "mse_normal": 0.010078134364448488
+  },
+  "tex_h4_microset_heldout": {
+    "n": 16,
+    "psnr_base": 27.02396422565962,
+    "psnr_normal": 24.702084081117395,
+    "psnr_shuffle": 24.746904345626,
+    "dpsnr_normal_minus_base": -2.321880144542228,
+    "dpsnr_normal_minus_shuffle": -0.044820264508608876,
+    "mae_y_swapA2": 0.004023570625577122,
+    "mae_y_shuffleRef": 0.00859115334606031,
+    "mse_normal": 0.015755186817841604
+  },
+  "tex_h4_ref_util_microset": true,
+  "tex_h4_ref_util_heldout": false,
+  "clear_ref_utilization": true,
+  "c2_audit_microset": {
+    "skipped": true,
+    "reason": "ref_util_ok"
+  },
+  "per_image_csv": "/root/data/experiments/V7_CODE_REVIEW_FIX/gate2_2/per_image_psnr.csv",
+  "gate2_2_pass": true,
+  "stop_reason": null
+}

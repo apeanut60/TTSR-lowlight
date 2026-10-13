@@ -47,6 +47,8 @@ class V7Model(nn.Module):
         self.d1_ch = d1_ch
         self.spatial_window = int(spatial_window)
         self.d1_enabled = bool(d1_enabled)
+        # 'align' = Match/Flow/DCN; 'tex_h4' = bypass align, A2 = tex['h4']
+        self.a2_mode = 'align'
         self.match_encoder = V5MatchEncoder(match_ch)
         self.texture_encoder = V6TextureEncoder(texture_channels)
         self.matcher = ChunkedHardMatcher(match_chunk)
@@ -69,10 +71,22 @@ class V7Model(nn.Module):
 
     def refine_at_h4(self, d2: Tensor, y0_m11: Tensor, ref_m11: Tensor):
         match, tex = self.match_and_texture(y0_m11, ref_m11)
-        if match.flow.shape[-2:] != d2.shape[-2:]:
-            raise SystemExit('H/4 match grid %s != D2 %s'
-                             % (tuple(match.flow.shape[-2:]), tuple(d2.shape[-2:])))
-        a2, aux2 = self.align_h4(tex['h4'], d2, match.flow, match.confidence)
+        if tex['h4'].shape[-2:] != d2.shape[-2:]:
+            raise SystemExit('H/4 tex grid %s != D2 %s'
+                             % (tuple(tex['h4'].shape[-2:]), tuple(d2.shape[-2:])))
+        if self.a2_mode == 'tex_h4':
+            # Bypass Match/Flow/DCN: feed co-located texture features as A2.
+            a2 = tex['h4']
+            aux2 = dict(align_bypassed=True, a2_mode='tex_h4')
+        elif self.a2_mode == 'align':
+            if match.flow.shape[-2:] != d2.shape[-2:]:
+                raise SystemExit('H/4 match grid %s != D2 %s'
+                                 % (tuple(match.flow.shape[-2:]),
+                                    tuple(d2.shape[-2:])))
+            a2, aux2 = self.align_h4(tex['h4'], d2, match.flow, match.confidence)
+            aux2['a2_mode'] = 'align'
+        else:
+            raise SystemExit('unknown a2_mode %r' % self.a2_mode)
         d2s, delta = self.refine_h4(d2, a2)
         aux2.update(dict(
             match=match, tex=tex, delta_d2=delta,
