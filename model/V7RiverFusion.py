@@ -1,9 +1,11 @@
-"""ReBaIR-inspired single-scale AttnFusion drop-in for V5RefineBlock.
+"""ReBaIR-inspired fusion drop-in for V5RefineBlock.
 
-Matches RIVER AttnFusion spatial layout: at each (h,w), Q=main attends over
-N aligned refs at that site (here N=1). Zero-init residual so ΔD=0 at step0.
+Modes:
+  - spatial_window=1: legacy N=1 co-located attn (Q/K grads structurally 0).
+  - spatial_window>=3: each query attends to a KxK neighborhood of Ref
+    tokens (N=K*K >= 9) so Softmax is non-trivial and Q/K get gradients.
 
-Not a full MultiScaleAttnFusion / MSFE port. Avoids global HW×HW attention.
+Zero-init residual out keeps step0 identity when out_conv is zero.
 """
 
 from __future__ import annotations
@@ -18,21 +20,27 @@ from model.V5TextureEncoder import ResidualBlock
 
 
 class V7RiverFusion(nn.Module):
-    """(D, A) → (D+ΔD, ΔD). A treated as N=1 ref stack."""
+    """(D, A) → (D+ΔD, ΔD)."""
 
     def __init__(self, base_ch: int, ref_ch: int,
-                 n_heads: int | None = None, head_dim: int = 16):
+                 n_heads: int | None = None, head_dim: int = 16,
+                 spatial_window: int = 1):
         super().__init__()
         if n_heads is None:
             if base_ch % head_dim != 0:
                 raise ValueError('base_ch %d not divisible by head_dim %d'
                                  % (base_ch, head_dim))
             n_heads = base_ch // head_dim
+        if spatial_window < 1 or spatial_window % 2 == 0:
+            raise ValueError('spatial_window must be odd positive, got %s'
+                             % spatial_window)
         emb = n_heads * head_dim
         self.n_heads = n_heads
         self.head_dim = head_dim
         self.emb = emb
         self.base_ch = base_ch
+        self.spatial_window = int(spatial_window)
+        self.n_keys = self.spatial_window ** 2
 
         self.in_base = (nn.Identity() if base_ch == emb
                         else nn.Conv2d(base_ch, emb, 1))
@@ -56,6 +64,16 @@ class V7RiverFusion(nn.Module):
             nn.init.zeros_(self.out_to_base.weight)
             nn.init.zeros_(self.out_to_base.bias)
 
+    def _window_kv(self, feat: Tensor) -> Tensor:
+        """feat [B,C,H,W] → [B, H*W, K*K, C] neighborhood tokens."""
+        k = self.spatial_window
+        pad = k // 2
+        # unfold: [B, C*K*K, H*W]
+        patches = F.unfold(feat, kernel_size=k, padding=pad)
+        b, _, hw = patches.shape
+        patches = patches.transpose(1, 2).reshape(b, hw, self.n_keys, self.emb)
+        return patches
+
     def forward(self, base_feat: Tensor, aligned_ref: Tensor
                 ) -> Tuple[Tensor, Tensor]:
         if base_feat.shape[-2:] != aligned_ref.shape[-2:]:
@@ -64,31 +82,36 @@ class V7RiverFusion(nn.Module):
         b, _, h, w = base_feat.shape
         nh, hd = self.n_heads, self.head_dim
         x = self.in_base(base_feat)
-        # ys: [B, N=1, C, H, W]
-        ys = self.in_ref(aligned_ref).unsqueeze(1)
-        n_ref = ys.shape[1]
+        y_ref = self.in_ref(aligned_ref)
 
         q = self.q_proj(x)
-        # (B*H*W, Nh, 1, Hd)
-        q = q.reshape(b, nh, hd, h * w).permute(0, 3, 1, 2).reshape(
-            b * h * w, nh, 1, hd)
-        k = self.k_proj(ys.reshape(b * n_ref, self.emb, h, w))
-        k = k.reshape(b, n_ref, nh, hd, h * w).permute(0, 4, 2, 1, 3).reshape(
-            b * h * w, nh, n_ref, hd)
-        v = self.v_proj(ys.reshape(b * n_ref, self.emb, h, w))
-        v = v.reshape(b, n_ref, nh, hd, h * w).permute(0, 4, 2, 1, 3).reshape(
-            b * h * w, nh, n_ref, hd)
+        # [B, Nh, HW, Hd]
+        q = q.reshape(b, nh, hd, h * w).permute(0, 1, 3, 2)
 
-        if hasattr(F, 'scaled_dot_product_attention'):
-            y = F.scaled_dot_product_attention(q, k, v)
-        else:
+        if self.spatial_window == 1:
+            # Legacy N=1 (kept for checkpoint compat / ablation)
+            k = self.k_proj(y_ref).reshape(b, nh, hd, h * w).permute(0, 1, 3, 2)
+            v = self.v_proj(y_ref).reshape(b, nh, hd, h * w).permute(0, 1, 3, 2)
+            # treat as N=1 along a new dim → same as before
+            k = k.unsqueeze(3)  # [B,Nh,HW,1,Hd]
+            v = v.unsqueeze(3)
+            q_ = q.unsqueeze(3)
             scale = hd ** -0.5
-            scores = torch.matmul(q, k.transpose(-2, -1)) * scale
-            y = torch.matmul(scores.softmax(dim=-1), v)
-        # (B*H*W, Nh, 1, Hd) → [B, C, H, W]
-        y = y.reshape(b, h * w, nh, hd).permute(0, 2, 3, 1).reshape(
-            b, self.emb, h, w)
+            scores = (q_ * k).sum(-1) * scale  # [B,Nh,HW,1]
+            attn = torch.matmul(scores.softmax(-1).unsqueeze(-2), v).squeeze(3)
+        else:
+            k_tok = self._window_kv(self.k_proj(y_ref))  # B,HW,N,C
+            v_tok = self._window_kv(self.v_proj(y_ref))
+            k = k_tok.reshape(b, h * w, self.n_keys, nh, hd).permute(0, 3, 1, 2, 4)
+            v = v_tok.reshape(b, h * w, self.n_keys, nh, hd).permute(0, 3, 1, 2, 4)
+            # q: [B,Nh,HW,Hd] → [B,Nh,HW,1,Hd]
+            q_ = q.unsqueeze(3)
+            scale = hd ** -0.5
+            scores = (q_ * k).sum(-1) * scale  # [B,Nh,HW,N]
+            attn = torch.matmul(scores.softmax(-1).unsqueeze(-2), v).squeeze(3)
+            # attn: [B,Nh,HW,Hd]
 
+        y = attn.permute(0, 1, 3, 2).reshape(b, self.emb, h, w)
         y = self.fusion(torch.cat([x, y], dim=1))
         y = self.out_conv(y)
         delta = self.out_to_base(y)
