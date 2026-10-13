@@ -259,5 +259,6 @@
     "c2_viz": "/root/data/experiments/V7_CODE_REVIEW_FIX/gate2_3/c2_viz"
   },
   "gate2_3_pass": true,
-  "train_authorization": "DENIED"
+  "train_authorization": "DENIED",
+  "report_commit": "cf7891b6ec88329f00b6b7ec949dfcc5a60887e0"
 }
