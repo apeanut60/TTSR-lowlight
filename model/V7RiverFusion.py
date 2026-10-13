@@ -65,13 +65,19 @@ class V7RiverFusion(nn.Module):
             nn.init.zeros_(self.out_to_base.bias)
 
     def _window_kv(self, feat: Tensor) -> Tensor:
-        """feat [B,C,H,W] → [B, H*W, K*K, C] neighborhood tokens."""
+        """feat [B,C,H,W] → [B, H*W, K*K, C] neighborhood tokens.
+
+        F.unfold returns [B, C*K*K, HW] with layout (C, kh, kw) along dim=1.
+        Must reshape to [B,C,K*K,HW] before permuting to [B,HW,K*K,C].
+        The buggy path transpose(1,2).reshape(B,HW,K*K,C) mixes C with K*K.
+        """
         k = self.spatial_window
         pad = k // 2
         # unfold: [B, C*K*K, H*W]
         patches = F.unfold(feat, kernel_size=k, padding=pad)
         b, _, hw = patches.shape
-        patches = patches.transpose(1, 2).reshape(b, hw, self.n_keys, self.emb)
+        patches = (patches.reshape(b, self.emb, self.n_keys, hw)
+                   .permute(0, 3, 2, 1).contiguous())
         return patches
 
     def forward(self, base_feat: Tensor, aligned_ref: Tensor

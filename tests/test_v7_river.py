@@ -92,6 +92,56 @@ class TestV7River(unittest.TestCase):
         self.assertGreater(_grad_norm(f, 'v_proj'), 0.0)
         self.assertEqual(f.n_keys, 9)
 
+    def test_window_kv_layout_center_and_neighbors(self):
+        """Exact token values: center + 3x3 neighborhood match padded feat."""
+        torch.manual_seed(0)
+        b, c, h, w, k = 2, 8, 5, 6, 3
+        f = V7RiverFusion(c, c, n_heads=2, head_dim=4, spatial_window=k)
+        # Unique values so layout mistakes cannot accidentally match
+        feat = torch.arange(b * c * h * w, dtype=torch.float32).reshape(b, c, h, w)
+        tok = f._window_kv(feat)  # [B, HW, K*K, C]
+        self.assertEqual(tuple(tok.shape), (b, h * w, k * k, c))
+
+        pad = k // 2
+        feat_pad = torch.nn.functional.pad(feat, (pad, pad, pad, pad), mode='constant')
+        # unfold zero-pads by default (same as F.unfold padding)
+        center = (k * k) // 2  # index 4 for 3x3
+        for bi in range(b):
+            for yi in range(h):
+                for xi in range(w):
+                    hw = yi * w + xi
+                    # center token == feat[bi, :, yi, xi]
+                    self.assertTrue(torch.equal(
+                        tok[bi, hw, center], feat[bi, :, yi, xi]),
+                        'center mismatch at (%d,%d,%d)' % (bi, yi, xi))
+                    # full neighborhood
+                    n = 0
+                    for dy in range(-pad, pad + 1):
+                        for dx in range(-pad, pad + 1):
+                            expect = feat_pad[bi, :, yi + pad + dy, xi + pad + dx]
+                            self.assertTrue(
+                                torch.equal(tok[bi, hw, n], expect),
+                                'nbr n=%d at (%d,%d,%d)' % (n, bi, yi, xi))
+                            n += 1
+
+    def test_window_kv_matches_manual_gather(self):
+        """_window_kv equals explicit gather for interior pixels (no pad)."""
+        c, h, w, k = 4, 4, 4, 3
+        f = V7RiverFusion(c, c, n_heads=1, head_dim=4, spatial_window=k)
+        feat = torch.randn(1, c, h, w)
+        tok = f._window_kv(feat)[0]  # HW,9,C
+        # pixel (1,1): neighborhood feat[:,0:3,0:3]
+        patch = feat[0, :, 0:3, 0:3].permute(1, 2, 0).reshape(9, c)
+        self.assertTrue(torch.allclose(tok[1 * w + 1], patch, atol=0))
+
+    def test_win3_forward_shapes(self):
+        f = V7RiverFusion(64, 64, n_heads=4, head_dim=16, spatial_window=3)
+        d = torch.randn(1, 64, 7, 9)
+        a = torch.randn(1, 64, 7, 9)
+        out, delta = f(d, a)
+        self.assertEqual(out.shape, d.shape)
+        self.assertEqual(delta.shape, d.shape)
+
 
 if __name__ == '__main__':
     unittest.main()
