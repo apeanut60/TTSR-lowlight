@@ -1,0 +1,263 @@
+{
+  "gate": "G2.3_attn_and_c2_geometry",
+  "locked": {
+    "repo_head_at_run": "95e4c846a032f2a24016cff5c83fadabb1e32211",
+    "g21_code_commit": "e597d47648d72b34ad2781b4140d6e9c7e02e3a0",
+    "g22_report_commit": "d143f481f6ce93eaa808b8beb86167fe37201018",
+    "g21_ckpt": "/root/data/experiments/V7_CODE_REVIEW_FIX/gate2_1/ckpt_microset_win3_fixed.pt",
+    "g21_ckpt_sha256": "362e55f4c5010f85cae9aa94613c8a86f0b83c2a925ae209852538c8c618ef39",
+    "tex_h4_ckpt": "/root/data/experiments/V7_CODE_REVIEW_FIX/gate2_2/ckpt_tex_h4_200.pt",
+    "tex_h4_ckpt_sha256": "0f4141749a7667c18fe7edeb602a3e7cfd27c15e59a03befbd08dc5b6ac95e3e",
+    "base_ckpt": "/root/data/experiments/llformer_lolv2real/canonical/llformer_lolv2real_base_E110.pth",
+    "base_ckpt_sha256": "7a4460ee3fa0dab94f8b5e44fd7e904d42261954e40251f8e96d57e21f2f4e2c",
+    "c2_ckpt": "/root/projects/TTSR-lowlight/pretrain_model/C2matching/feature_extraction.pth",
+    "c2_ckpt_sha256": "09609b61283680829ffcd59707b080abd901d4623f917ddc3ce35b37fe927b00",
+    "g22_locked_conclusion": {
+      "microset_n_shuf_dpsnr": 0.2760442070180473,
+      "heldout_n_shuf_dpsnr": -0.044820264508608876,
+      "heldout_n_base_dpsnr": -2.321880144542228,
+      "note": "G2.2 PASS was ref-path diagnosis only; NOT heldout generalization"
+    }
+  },
+  "task_a_attention": {
+    "g21": {
+      "tag": "g21_align",
+      "mean_weight_max": 0.11154127772897482,
+      "mean_entropy_norm": 0.9999948590993881,
+      "grads": {
+        "q": 1.946904070848632e-06,
+        "k": 5.750097670897958e-06,
+        "v": 0.014414174482226372,
+        "out_conv": 0.09004115033894777
+      },
+      "deltas": {
+        "q": 0.10698240739293396,
+        "k": 0.14363672956824303,
+        "v": 0.948337409645319,
+        "out_conv": 0.5148268975317478,
+        "fusion": 1.9548586392775178
+      },
+      "attention_selection_real": false,
+      "v_conv_content_transfer": true,
+      "per_image": [
+        {
+          "name": "low00001.png",
+          "arm": "g21_align",
+          "weight_max_mean": 0.11160150170326233,
+          "entropy_norm": 0.9999940395355225,
+          "frac_argmax_center": 0.07257080078125,
+          "weight_center_mean": 0.11109708249568939
+        },
+        {
+          "name": "low00002.png",
+          "arm": "g21_align",
+          "weight_max_mean": 0.1116003468632698,
+          "entropy_norm": 0.999994158744812,
+          "frac_argmax_center": 0.07647705078125,
+          "weight_center_mean": 0.11109618097543716
+        },
+        {
+          "name": "low00003.png",
+          "arm": "g21_align",
+          "weight_max_mean": 0.11144101619720459,
+          "entropy_norm": 0.9999971985816956,
+          "frac_argmax_center": 0.07574462890625,
+          "weight_center_mean": 0.11111277341842651
+        },
+        {
+          "name": "low00004.png",
+          "arm": "g21_align",
+          "weight_max_mean": 0.11145642399787903,
+          "entropy_norm": 0.9999969601631165,
+          "frac_argmax_center": 0.0750732421875,
+          "weight_center_mean": 0.11111259460449219
+        },
+        {
+          "name": "low00005.png",
+          "arm": "g21_align",
+          "weight_max_mean": 0.11163348704576492,
+          "entropy_norm": 0.9999926090240479,
+          "frac_argmax_center": 0.07489013671875,
+          "weight_center_mean": 0.11110071837902069
+        },
+        {
+          "name": "low00006.png",
+          "arm": "g21_align",
+          "weight_max_mean": 0.11164475977420807,
+          "entropy_norm": 0.9999925494194031,
+          "frac_argmax_center": 0.07757568359375,
+          "weight_center_mean": 0.1110987663269043
+        },
+        {
+          "name": "low00007.png",
+          "arm": "g21_align",
+          "weight_max_mean": 0.11147338151931763,
+          "entropy_norm": 0.999996542930603,
+          "frac_argmax_center": 0.0750732421875,
+          "weight_center_mean": 0.11110444366931915
+        },
+        {
+          "name": "low00009.png",
+          "arm": "g21_align",
+          "weight_max_mean": 0.11147930473089218,
+          "entropy_norm": 0.9999948143959045,
+          "frac_argmax_center": 0.0594482421875,
+          "weight_center_mean": 0.11110560595989227
+        }
+      ]
+    },
+    "tex_h4": {
+      "tag": "tex_h4",
+      "mean_weight_max": 0.11321484111249447,
+      "mean_entropy_norm": 0.9998978599905968,
+      "grads": {
+        "q": 5.0267473170606536e-05,
+        "k": 3.6201905913912924e-05,
+        "v": 0.024540422949939966,
+        "out_conv": 0.11115810368210077
+      },
+      "deltas": {
+        "q": 0.7597863133996725,
+        "k": 0.7343096882104874,
+        "v": 1.073378105647862,
+        "out_conv": 0.4797728303819895,
+        "fusion": 1.8092307653278112
+      },
+      "attention_selection_real": false,
+      "v_conv_content_transfer": false,
+      "per_image": [
+        {
+          "name": "low00001.png",
+          "arm": "tex_h4",
+          "weight_max_mean": 0.11332172900438309,
+          "entropy_norm": 0.9998956322669983,
+          "frac_argmax_center": 0.06524658203125,
+          "weight_center_mean": 0.11106625199317932
+        },
+        {
+          "name": "low00002.png",
+          "arm": "tex_h4",
+          "weight_max_mean": 0.11334531754255295,
+          "entropy_norm": 0.9998928308486938,
+          "frac_argmax_center": 0.06427001953125,
+          "weight_center_mean": 0.11106517910957336
+        },
+        {
+          "name": "low00003.png",
+          "arm": "tex_h4",
+          "weight_max_mean": 0.11272034794092178,
+          "entropy_norm": 0.9999459981918335,
+          "frac_argmax_center": 0.060791015625,
+          "weight_center_mean": 0.11105171591043472
+        },
+        {
+          "name": "low00004.png",
+          "arm": "tex_h4",
+          "weight_max_mean": 0.11264172196388245,
+          "entropy_norm": 0.9999470710754395,
+          "frac_argmax_center": 0.06024169921875,
+          "weight_center_mean": 0.11105845868587494
+        },
+        {
+          "name": "low00005.png",
+          "arm": "tex_h4",
+          "weight_max_mean": 0.11381974816322327,
+          "entropy_norm": 0.9998407363891602,
+          "frac_argmax_center": 0.06842041015625,
+          "weight_center_mean": 0.11116712540388107
+        },
+        {
+          "name": "low00006.png",
+          "arm": "tex_h4",
+          "weight_max_mean": 0.11412054300308228,
+          "entropy_norm": 0.9998160004615784,
+          "frac_argmax_center": 0.06982421875,
+          "weight_center_mean": 0.11115606874227524
+        },
+        {
+          "name": "low00007.png",
+          "arm": "tex_h4",
+          "weight_max_mean": 0.11280913650989532,
+          "entropy_norm": 0.9999461770057678,
+          "frac_argmax_center": 0.0699462890625,
+          "weight_center_mean": 0.11105427145957947
+        },
+        {
+          "name": "low00009.png",
+          "arm": "tex_h4",
+          "weight_max_mean": 0.11294018477201462,
+          "entropy_norm": 0.9998984336853027,
+          "frac_argmax_center": 0.0482177734375,
+          "weight_center_mean": 0.11111444234848022
+        }
+      ]
+    },
+    "verdict": "no_spatial_selection",
+    "viz_dir": "/root/data/experiments/V7_CODE_REVIEW_FIX/gate2_3/attn_viz",
+    "verdict_detail": "Softmax near-uniform on both arms; G2.1 V/Conv content transfer; tex_h4 updates Q/K but does not peak attention \u2014 Ref use is non-selective aggregation"
+  },
+  "task_b_c2": {
+    "c2_path": "/root/projects/TTSR-lowlight/pretrain_model/C2matching/feature_extraction.pth",
+    "c2_sha256": "09609b61283680829ffcd59707b080abd901d4623f917ddc3ce35b37fe927b00",
+    "strict_load_verified": true,
+    "feature_shape": [
+      1,
+      256,
+      100,
+      150
+    ],
+    "feature_channels": 256,
+    "microset": {
+      "n": 8,
+      "self_flow_mean": 0.018415360995277297,
+      "self_flow_frac_lt1": 0.999516673386097,
+      "correct_warp_grad_corr": 0.10338143166154623,
+      "shuffle_warp_grad_corr": 0.06339917867444456,
+      "delta_grad_corr": 0.039982252987101674,
+      "delta_warp_l1": 0.044886864721775055,
+      "roll_frac_near_expected": 0.3678000057116151,
+      "roll_flow_err": 38.65378475189209,
+      "delta_conf": 0.021307017654180527
+    },
+    "microset_heldout": {
+      "n": 16,
+      "self_flow_mean": 0.008480735620196356,
+      "self_flow_frac_lt1": 0.9997541792690754,
+      "correct_warp_grad_corr": 0.020428574869583827,
+      "shuffle_warp_grad_corr": 0.0083347379886618,
+      "delta_grad_corr": 0.012093836880922026,
+      "delta_warp_l1": 0.03843563515692949,
+      "roll_frac_near_expected": 0.270370835904032,
+      "roll_flow_err": 44.706308126449585,
+      "delta_conf": 0.01352117583155632
+    },
+    "geometric_match_ok": false,
+    "viz_dir": "/root/data/experiments/V7_CODE_REVIEW_FIX/gate2_3/c2_viz",
+    "note": "Geometric criteria: self flow, warp grad-corr/L1 correct>shuffle, synthetic roll recovery \u2014 NOT confidence alone"
+  },
+  "task_c_flags": {
+    "ref_path_works": true,
+    "heldout_ref_gain": false,
+    "heldout_base_safety": false,
+    "values": {
+      "microset_dpsnr_n_shuf": 0.2760442070180473,
+      "heldout_dpsnr_n_shuf": -0.044820264508608876,
+      "heldout_dpsnr_n_base": -2.321880144542228
+    },
+    "rule": "Long train / Setting B / Official Test require ALL of: ref_path_works AND heldout_ref_gain AND heldout_base_safety AND (C2 geometric_match_ok OR expanded-microset plan). G2.2 clear_ref_utilization=OR is RETRACTED.",
+    "allow_long_train": false,
+    "next_step": {
+      "type": "expand_microset_single_variable",
+      "action": "Propose only: keep tex_h4 (or identity) path; expand correct-only microset beyond n=8 to test whether heldout_ref_gain / heldout_base_safety can turn positive \u2014 DO NOT TRAIN in Gate 2.3",
+      "train_now": false
+    }
+  },
+  "artifacts": {
+    "attn_csv": "/root/data/experiments/V7_CODE_REVIEW_FIX/gate2_3/attn_per_image.csv",
+    "c2_csv": "/root/data/experiments/V7_CODE_REVIEW_FIX/gate2_3/c2_match_per_image.csv",
+    "attn_viz": "/root/data/experiments/V7_CODE_REVIEW_FIX/gate2_3/attn_viz",
+    "c2_viz": "/root/data/experiments/V7_CODE_REVIEW_FIX/gate2_3/c2_viz"
+  },
+  "gate2_3_pass": true,
+  "train_authorization": "DENIED"
+}
