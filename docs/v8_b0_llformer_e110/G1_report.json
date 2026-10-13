@@ -1,0 +1,108 @@
+{
+  "arms": {
+    "B0_Nano": {
+      "ckpt": "/root/data/experiments/V8_B0_llformer_e110/arms/B0_Nano/checkpoints/ckpt_000400.pt",
+      "formal_dev": {
+        "dpsnr_n_base": -0.4298004008100218,
+        "dpsnr_n_self": 0.0701114327818732,
+        "dpsnr_n_shuffle": 0.06976633013350975,
+        "dpsnr_n_zeroT": -0.19353411576418636,
+        "mse_nano_normal": 0.03914818214980187,
+        "n": 64,
+        "n_severe_vs_base": 26,
+        "psnr_base": 22.858479165899308,
+        "psnr_nano_normal": 22.428678765089288,
+        "psnr_nano_shuffle": 22.358912434955776,
+        "psnr_nano_zeroT": 22.622212880853475,
+        "psnr_self_ref": 22.358567332307416,
+        "ref_dependence_ok": false
+      },
+      "microset_heldout": {
+        "dpsnr_n_base": -0.679746751822123,
+        "dpsnr_n_self": 0.06330869901351366,
+        "dpsnr_n_shuffle": -0.017250844334169457,
+        "dpsnr_n_zeroT": -0.435188221931758,
+        "mse_nano_normal": 0.010157268028706312,
+        "n": 16,
+        "n_severe_vs_base": 8,
+        "psnr_base": 27.02396422565962,
+        "psnr_nano_normal": 26.344217473837496,
+        "psnr_nano_shuffle": 26.361468318171667,
+        "psnr_nano_zeroT": 26.779405695769256,
+        "psnr_self_ref": 26.280908774823985,
+        "ref_dependence_ok": false
+      },
+      "severe_dev": 26,
+      "severe_heldout": 8,
+      "train_batch_mse": 0.016740256382036023
+    },
+    "B0_Self": {
+      "ckpt": "/root/data/experiments/V8_B0_llformer_e110/arms/B0_Self/checkpoints/ckpt_000400.pt",
+      "formal_dev": {
+        "dpsnr_n_base": -0.3789761658330689,
+        "dpsnr_n_self": 0.07409760744940902,
+        "dpsnr_n_shuffle": 0.018181934290267765,
+        "dpsnr_n_zeroT": -0.1771020214612818,
+        "mse_nano_normal": 0.03910242590063717,
+        "n": 64,
+        "n_severe_vs_base": 25,
+        "psnr_base": 22.858479165899308,
+        "psnr_nano_normal": 22.479503000066238,
+        "psnr_nano_shuffle": 22.461321065775973,
+        "psnr_nano_zeroT": 22.656605021527522,
+        "psnr_self_ref": 22.405405392616835,
+        "ref_dependence_ok": false
+      },
+      "microset_heldout": {
+        "dpsnr_n_base": -0.586294464162602,
+        "dpsnr_n_self": 0.08930675331207505,
+        "dpsnr_n_shuffle": -0.06992810466634447,
+        "dpsnr_n_zeroT": -0.4301721875096485,
+        "mse_nano_normal": 0.00995958672137931,
+        "n": 16,
+        "n_severe_vs_base": 8,
+        "psnr_base": 27.02396422565962,
+        "psnr_nano_normal": 26.43766976149702,
+        "psnr_nano_shuffle": 26.507597866163362,
+        "psnr_nano_zeroT": 26.867841949006667,
+        "psnr_self_ref": 26.348363008184947,
+        "ref_dependence_ok": false
+      },
+      "severe_dev": 25,
+      "severe_heldout": 8,
+      "train_batch_mse": 0.016843021599925123
+    }
+  },
+  "authorize_long_train": false,
+  "forbid": [
+    "SKFF",
+    "DINO",
+    "C2",
+    "DCN",
+    "extra_gate",
+    "llformer_finetune",
+    "official_test_tuning"
+  ],
+  "gate": "V8_B0_Gate1",
+  "gate1_complete": true,
+  "lock_init_sha": "58199392a768a62af832435c923cf67512f6767cb0fdd40976f47b0ff9a845a7",
+  "paired_comparison": {
+    "formal_dev_dpsnr_n_base": {
+      "Nano": -0.4298004008100218,
+      "Self": -0.3789761658330689
+    },
+    "heldout_dpsnr_n_base": {
+      "Nano": -0.679746751822123,
+      "Self": -0.586294464162602
+    },
+    "heldout_ref_dep_nano": false,
+    "heldout_ref_dep_self_arm": false,
+    "note": "same init/seed/schedule; Ref source differs",
+    "train_batch_mse": {
+      "Nano": 0.016740256382036023,
+      "Self": 0.016843021599925123
+    }
+  },
+  "repo_commit": "577701a17d1ed7bd8ad541306a830d23d470cd4a",
+  "step": 400
+}
