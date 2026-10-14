@@ -14,6 +14,19 @@ warnings.filterwarnings('ignore')
 
 
 if __name__ == '__main__':
+    ### optional reproducibility
+    _seed = getattr(args, 'seed', -1)
+    if _seed is not None and int(_seed) >= 0:
+        import random
+        import numpy as np
+        random.seed(int(_seed))
+        np.random.seed(int(_seed))
+        torch.manual_seed(int(_seed))
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(int(_seed))
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+
     ### make save_dir
     _logger = mkExpDir(args)
 
