@@ -112,54 +112,65 @@ def calc_psnr_rgb(img1, img2):
     return -10.0 * math.log10(mse)
     
   
-def calc_ssim(img1, img2):
-    def ssim(img1, img2):
-        C1 = (0.01 * 255)**2
-        C2 = (0.03 * 255)**2
+def _ssim_map_mean(img1, img2):
+    """Single-channel SSIM (MATLAB-compatible window).
 
-        img1 = img1.astype(np.float64)
-        img2 = img2.astype(np.float64)
-        kernel = cv2.getGaussianKernel(11, 1.5)
-        window = np.outer(kernel, kernel.transpose())
+    Args:
+        img1, img2: [h, w], range [0, 255]
+    """
+    C1 = (0.01 * 255)**2
+    C2 = (0.03 * 255)**2
 
-        mu1 = cv2.filter2D(img1, -1, window)[5:-5, 5:-5]  # valid
-        mu2 = cv2.filter2D(img2, -1, window)[5:-5, 5:-5]
-        mu1_sq = mu1**2
-        mu2_sq = mu2**2
-        mu1_mu2 = mu1 * mu2
-        sigma1_sq = cv2.filter2D(img1**2, -1, window)[5:-5, 5:-5] - mu1_sq
-        sigma2_sq = cv2.filter2D(img2**2, -1, window)[5:-5, 5:-5] - mu2_sq
-        sigma12 = cv2.filter2D(img1 * img2, -1, window)[5:-5, 5:-5] - mu1_mu2
+    img1 = img1.astype(np.float64)
+    img2 = img2.astype(np.float64)
+    kernel = cv2.getGaussianKernel(11, 1.5)
+    window = np.outer(kernel, kernel.transpose())
 
-        ssim_map = ((2 * mu1_mu2 + C1) * (2 * sigma12 + C2)) / ((mu1_sq + mu2_sq + C1) *
-                                                                (sigma1_sq + sigma2_sq + C2))
-        return ssim_map.mean()
+    mu1 = cv2.filter2D(img1, -1, window)[5:-5, 5:-5]  # valid
+    mu2 = cv2.filter2D(img2, -1, window)[5:-5, 5:-5]
+    mu1_sq = mu1**2
+    mu2_sq = mu2**2
+    mu1_mu2 = mu1 * mu2
+    sigma1_sq = cv2.filter2D(img1**2, -1, window)[5:-5, 5:-5] - mu1_sq
+    sigma2_sq = cv2.filter2D(img2**2, -1, window)[5:-5, 5:-5] - mu2_sq
+    sigma12 = cv2.filter2D(img1 * img2, -1, window)[5:-5, 5:-5] - mu1_mu2
 
-    ### args:
-        # img1: [h, w, c], range [0, 255]
-        # img2: [h, w, c], range [0, 255]
-        # the same outputs as MATLAB's
-    border = 0
-    img1_y = np.dot(img1, [65.738,129.057,25.064])/256.0+16.0
-    img2_y = np.dot(img2, [65.738,129.057,25.064])/256.0+16.0
+    ssim_map = ((2 * mu1_mu2 + C1) * (2 * sigma12 + C2)) / ((mu1_sq + mu2_sq + C1) *
+                                                            (sigma1_sq + sigma2_sq + C2))
+    return ssim_map.mean()
+
+
+def calc_ssim_y(img1, img2):
+    """Y-channel SSIM (BT.601-ish coeffs used historically in this repo).
+
+    Args:
+        img1, img2: [h, w, c], range [0, 255]
+    """
     if not img1.shape == img2.shape:
         raise ValueError('Input images must have the same dimensions.')
-    h, w = img1.shape[:2]
-    img1_y = img1_y[border:h-border, border:w-border]
-    img2_y = img2_y[border:h-border, border:w-border]
+    img1_y = np.dot(img1, [65.738, 129.057, 25.064]) / 256.0 + 16.0
+    img2_y = np.dot(img2, [65.738, 129.057, 25.064]) / 256.0 + 16.0
+    return _ssim_map_mean(img1_y, img2_y)
 
-    if img1_y.ndim == 2:
-        return ssim(img1_y, img2_y)
-    elif img1.ndim == 3:
+
+def calc_ssim(img1, img2):
+    """RGB SSIM: mean of per-channel SSIM (not Y-only).
+
+    Args:
+        img1, img2: [h, w, c] or [h, w], range [0, 255]
+    """
+    if not img1.shape == img2.shape:
+        raise ValueError('Input images must have the same dimensions.')
+    if img1.ndim == 2:
+        return _ssim_map_mean(img1, img2)
+    if img1.ndim == 3:
         if img1.shape[2] == 3:
-            ssims = []
-            for i in range(3):
-                ssims.append(ssim(img1, img2))
-            return np.array(ssims).mean()
-        elif img1.shape[2] == 1:
-            return ssim(np.squeeze(img1), np.squeeze(img2))
-    else:
-        raise ValueError('Wrong input image dimensions.')
+            return float(np.mean([
+                _ssim_map_mean(img1[:, :, i], img2[:, :, i]) for i in range(3)
+            ]))
+        if img1.shape[2] == 1:
+            return _ssim_map_mean(np.squeeze(img1), np.squeeze(img2))
+    raise ValueError('Wrong input image dimensions.')
 
 
 def mean_align(sr, hr):

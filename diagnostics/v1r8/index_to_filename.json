@@ -1,0 +1,242 @@
+[
+  {
+    "idx": 0,
+    "filename": "2037.jpg",
+    "low_path": "/root/data/datasets/data1/Eval/Huawei/low/2037.jpg",
+    "high_path": "/root/data/datasets/data1/Eval/Huawei/high/2037.jpg",
+    "focus": true,
+    "group": "neg"
+  },
+  {
+    "idx": 1,
+    "filename": "2038.jpg",
+    "low_path": "/root/data/datasets/data1/Eval/Huawei/low/2038.jpg",
+    "high_path": "/root/data/datasets/data1/Eval/Huawei/high/2038.jpg",
+    "focus": false,
+    "group": "other"
+  },
+  {
+    "idx": 2,
+    "filename": "2039.jpg",
+    "low_path": "/root/data/datasets/data1/Eval/Huawei/low/2039.jpg",
+    "high_path": "/root/data/datasets/data1/Eval/Huawei/high/2039.jpg",
+    "focus": false,
+    "group": "other"
+  },
+  {
+    "idx": 3,
+    "filename": "2040.jpg",
+    "low_path": "/root/data/datasets/data1/Eval/Huawei/low/2040.jpg",
+    "high_path": "/root/data/datasets/data1/Eval/Huawei/high/2040.jpg",
+    "focus": false,
+    "group": "other"
+  },
+  {
+    "idx": 4,
+    "filename": "2041.jpg",
+    "low_path": "/root/data/datasets/data1/Eval/Huawei/low/2041.jpg",
+    "high_path": "/root/data/datasets/data1/Eval/Huawei/high/2041.jpg",
+    "focus": true,
+    "group": "neg"
+  },
+  {
+    "idx": 5,
+    "filename": "2042.jpg",
+    "low_path": "/root/data/datasets/data1/Eval/Huawei/low/2042.jpg",
+    "high_path": "/root/data/datasets/data1/Eval/Huawei/high/2042.jpg",
+    "focus": false,
+    "group": "other"
+  },
+  {
+    "idx": 6,
+    "filename": "2043.jpg",
+    "low_path": "/root/data/datasets/data1/Eval/Huawei/low/2043.jpg",
+    "high_path": "/root/data/datasets/data1/Eval/Huawei/high/2043.jpg",
+    "focus": false,
+    "group": "other"
+  },
+  {
+    "idx": 7,
+    "filename": "2044.jpg",
+    "low_path": "/root/data/datasets/data1/Eval/Huawei/low/2044.jpg",
+    "high_path": "/root/data/datasets/data1/Eval/Huawei/high/2044.jpg",
+    "focus": false,
+    "group": "other"
+  },
+  {
+    "idx": 8,
+    "filename": "2045.jpg",
+    "low_path": "/root/data/datasets/data1/Eval/Huawei/low/2045.jpg",
+    "high_path": "/root/data/datasets/data1/Eval/Huawei/high/2045.jpg",
+    "focus": false,
+    "group": "other"
+  },
+  {
+    "idx": 9,
+    "filename": "2046.jpg",
+    "low_path": "/root/data/datasets/data1/Eval/Huawei/low/2046.jpg",
+    "high_path": "/root/data/datasets/data1/Eval/Huawei/high/2046.jpg",
+    "focus": false,
+    "group": "other"
+  },
+  {
+    "idx": 10,
+    "filename": "2047.jpg",
+    "low_path": "/root/data/datasets/data1/Eval/Huawei/low/2047.jpg",
+    "high_path": "/root/data/datasets/data1/Eval/Huawei/high/2047.jpg",
+    "focus": false,
+    "group": "other"
+  },
+  {
+    "idx": 11,
+    "filename": "2048.jpg",
+    "low_path": "/root/data/datasets/data1/Eval/Huawei/low/2048.jpg",
+    "high_path": "/root/data/datasets/data1/Eval/Huawei/high/2048.jpg",
+    "focus": false,
+    "group": "other"
+  },
+  {
+    "idx": 12,
+    "filename": "2049.jpg",
+    "low_path": "/root/data/datasets/data1/Eval/Huawei/low/2049.jpg",
+    "high_path": "/root/data/datasets/data1/Eval/Huawei/high/2049.jpg",
+    "focus": false,
+    "group": "other"
+  },
+  {
+    "idx": 13,
+    "filename": "2050.jpg",
+    "low_path": "/root/data/datasets/data1/Eval/Huawei/low/2050.jpg",
+    "high_path": "/root/data/datasets/data1/Eval/Huawei/high/2050.jpg",
+    "focus": false,
+    "group": "other"
+  },
+  {
+    "idx": 14,
+    "filename": "2051.jpg",
+    "low_path": "/root/data/datasets/data1/Eval/Huawei/low/2051.jpg",
+    "high_path": "/root/data/datasets/data1/Eval/Huawei/high/2051.jpg",
+    "focus": false,
+    "group": "other"
+  },
+  {
+    "idx": 15,
+    "filename": "2052.jpg",
+    "low_path": "/root/data/datasets/data1/Eval/Huawei/low/2052.jpg",
+    "high_path": "/root/data/datasets/data1/Eval/Huawei/high/2052.jpg",
+    "focus": false,
+    "group": "other"
+  },
+  {
+    "idx": 16,
+    "filename": "2053.jpg",
+    "low_path": "/root/data/datasets/data1/Eval/Huawei/low/2053.jpg",
+    "high_path": "/root/data/datasets/data1/Eval/Huawei/high/2053.jpg",
+    "focus": true,
+    "group": "neg"
+  },
+  {
+    "idx": 17,
+    "filename": "2054.jpg",
+    "low_path": "/root/data/datasets/data1/Eval/Huawei/low/2054.jpg",
+    "high_path": "/root/data/datasets/data1/Eval/Huawei/high/2054.jpg",
+    "focus": false,
+    "group": "other"
+  },
+  {
+    "idx": 18,
+    "filename": "2055.jpg",
+    "low_path": "/root/data/datasets/data1/Eval/Huawei/low/2055.jpg",
+    "high_path": "/root/data/datasets/data1/Eval/Huawei/high/2055.jpg",
+    "focus": false,
+    "group": "other"
+  },
+  {
+    "idx": 19,
+    "filename": "2056.jpg",
+    "low_path": "/root/data/datasets/data1/Eval/Huawei/low/2056.jpg",
+    "high_path": "/root/data/datasets/data1/Eval/Huawei/high/2056.jpg",
+    "focus": true,
+    "group": "pos"
+  },
+  {
+    "idx": 20,
+    "filename": "2057.jpg",
+    "low_path": "/root/data/datasets/data1/Eval/Huawei/low/2057.jpg",
+    "high_path": "/root/data/datasets/data1/Eval/Huawei/high/2057.jpg",
+    "focus": false,
+    "group": "other"
+  },
+  {
+    "idx": 21,
+    "filename": "2058.jpg",
+    "low_path": "/root/data/datasets/data1/Eval/Huawei/low/2058.jpg",
+    "high_path": "/root/data/datasets/data1/Eval/Huawei/high/2058.jpg",
+    "focus": false,
+    "group": "other"
+  },
+  {
+    "idx": 22,
+    "filename": "2059.jpg",
+    "low_path": "/root/data/datasets/data1/Eval/Huawei/low/2059.jpg",
+    "high_path": "/root/data/datasets/data1/Eval/Huawei/high/2059.jpg",
+    "focus": false,
+    "group": "other"
+  },
+  {
+    "idx": 23,
+    "filename": "2060.jpg",
+    "low_path": "/root/data/datasets/data1/Eval/Huawei/low/2060.jpg",
+    "high_path": "/root/data/datasets/data1/Eval/Huawei/high/2060.jpg",
+    "focus": false,
+    "group": "other"
+  },
+  {
+    "idx": 24,
+    "filename": "2061.jpg",
+    "low_path": "/root/data/datasets/data1/Eval/Huawei/low/2061.jpg",
+    "high_path": "/root/data/datasets/data1/Eval/Huawei/high/2061.jpg",
+    "focus": false,
+    "group": "other"
+  },
+  {
+    "idx": 25,
+    "filename": "2062.jpg",
+    "low_path": "/root/data/datasets/data1/Eval/Huawei/low/2062.jpg",
+    "high_path": "/root/data/datasets/data1/Eval/Huawei/high/2062.jpg",
+    "focus": true,
+    "group": "pos"
+  },
+  {
+    "idx": 26,
+    "filename": "2063.jpg",
+    "low_path": "/root/data/datasets/data1/Eval/Huawei/low/2063.jpg",
+    "high_path": "/root/data/datasets/data1/Eval/Huawei/high/2063.jpg",
+    "focus": true,
+    "group": "pos"
+  },
+  {
+    "idx": 27,
+    "filename": "2064.jpg",
+    "low_path": "/root/data/datasets/data1/Eval/Huawei/low/2064.jpg",
+    "high_path": "/root/data/datasets/data1/Eval/Huawei/high/2064.jpg",
+    "focus": false,
+    "group": "other"
+  },
+  {
+    "idx": 28,
+    "filename": "2065.jpg",
+    "low_path": "/root/data/datasets/data1/Eval/Huawei/low/2065.jpg",
+    "high_path": "/root/data/datasets/data1/Eval/Huawei/high/2065.jpg",
+    "focus": false,
+    "group": "other"
+  },
+  {
+    "idx": 29,
+    "filename": "2066.jpg",
+    "low_path": "/root/data/datasets/data1/Eval/Huawei/low/2066.jpg",
+    "high_path": "/root/data/datasets/data1/Eval/Huawei/high/2066.jpg",
+    "focus": false,
+    "group": "other"
+  }
+]

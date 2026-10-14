@@ -54,6 +54,10 @@ parser.add_argument('--eval_ref_degrade', type=str2bool, default=None,
                     help='Override ref degradation for the test loader only; None = follow --ref_degrade')
 parser.add_argument('--ref_degrade_nanobanana', type=str2bool, default=False,
                     help='Apply mild ref degradation to nanobanana refs during mixed training')
+parser.add_argument('--ref_photo_aug', type=str2bool, default=False,
+                    help='Mild brightness/saturation jitter on Ref only (±ref_photo_aug_range)')
+parser.add_argument('--ref_photo_aug_range', type=float, default=0.05,
+                    help='Ref-only photo aug amplitude (0.05 = ±5%)')
 
 ### dataloader setting
 parser.add_argument('--num_workers', type=int, default=4,
@@ -87,6 +91,30 @@ parser.add_argument('--ref_correct_w', type=float, default=0.0,
 parser.add_argument('--eval_mean_align', type=str2bool, default=True,
                     help='Also report mean-aligned metrics (prediction rescaled to GT Y-mean) '
                          'alongside the raw metrics; diagnostic only, never used for checkpoint selection')
+parser.add_argument('--query_illum_align', type=str2bool, default=False,
+                    help='v1r6: brightness-align Low Query toward Nano Ref before SearchTransfer '
+                         '(does not change MainNet Low / Ref Value). Default off = original behavior')
+parser.add_argument('--query_illum_alpha', type=float, default=0.0,
+                    help='Blend strength for query illumination alignment in [0,1]; '
+                         '0 keeps original Query (bit-identical when align flag on)')
+parser.add_argument('--query_gamma_min', type=float, default=0.3,
+                    help='Minimum gamma for reference-guided query illumination search')
+parser.add_argument('--query_gamma_max', type=float, default=1.0,
+                    help='Maximum gamma for reference-guided query illumination search')
+parser.add_argument('--query_hist_beta', type=float, default=0.0,
+                    help='v1r7: partial luminance histogram matching strength after gamma '
+                         '(0 disables hist; Query only)')
+parser.add_argument('--query_hist_bins', type=int, default=256,
+                    help='Number of bins for query luminance histogram matching LUT')
+parser.add_argument('--texture_fusion', type=str2bool, default=False,
+                    help='v1r9 eval-only: mix B2 SearchTransfer texture with Identity '
+                         'Reference texture. Default False = original single-path behavior')
+parser.add_argument('--texture_fusion_lambda', type=float, default=0.0,
+                    help='Identity blend weight in [0,1]: T=(1-λ)T_B2 + λ T_id')
+parser.add_argument('--texture_fusion_s_source', type=str, default='a0',
+                    help='Soft-attention source when texture_fusion is on: a0 | b2 | search')
+parser.add_argument('--eval_per_image', type=str2bool, default=False,
+                    help='During eval, also write per-image RGB PSNR/SSIM JSON under save_dir')
 parser.add_argument('--illum_match_w', type=float, default=0.0,
                     help='Weight for low-frequency illumination/tone matching loss against GT')
 parser.add_argument('--illum_match_factor', type=int, default=8,
@@ -173,6 +201,8 @@ parser.add_argument('--rec_w', type=float, default=1.,
                     help='The weight of reconstruction loss')
 parser.add_argument('--rec_loss_type', type=str, default='l1',
                     help='Reconstruction loss type: l1 / l2 / charbonnier')
+parser.add_argument('--ms_ssim_w', type=float, default=0.,
+                    help='Weight of (1 - MS-SSIM) loss; 0 disables')
 parser.add_argument('--per_w', type=float, default=0.1,
                     help='The weight of perceptual loss')
 parser.add_argument('--tpl_w', type=float, default=0.1,
@@ -209,9 +239,15 @@ parser.add_argument('--lr_rate_illum', type=float, default=-1,
 parser.add_argument('--lr_rate_refillum', type=float, default=-1,
                     help='Separate learning rate for the reference illumination transfer module; -1 means use lr_rate')
 parser.add_argument('--decay', type=float, default=999999,
-                    help='Learning rate decay type')
+                    help='Learning rate decay type / StepLR step_size')
 parser.add_argument('--gamma', type=float, default=0.5,
                     help='Learning rate decay factor for step decay')
+parser.add_argument('--lr_scheduler', type=str, default='step',
+                    help='LR scheduler: step / cosine')
+parser.add_argument('--eta_min', type=float, default=1e-7,
+                    help='Min LR for cosine annealing')
+parser.add_argument('--seed', type=int, default=-1,
+                    help='Global RNG seed; <0 means do not seed')
 
 ### training setting
 parser.add_argument('--batch_size', type=int, default=4,

@@ -1,0 +1,12 @@
+{
+  "spearman_vs_delta_psnr_B2_minus_A0": {
+    "delta_id_cos": -0.07630700778642936,
+    "delta_neg_l2": -0.0932146829810901,
+    "match_changed_frac": 0.035817575083426034,
+    "delta_neg_T3_gt": -0.058954393770856504,
+    "delta_neg_luma_err": 0.9679644048943271,
+    "delta_max_cos": 0.0353726362625139
+  },
+  "n": 30,
+  "note": "exploratory"
+}

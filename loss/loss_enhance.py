@@ -45,6 +45,84 @@ class PerceptualLoss(nn.Module):
         return F.mse_loss(sr_relu5_1, hr_relu5_1)
 
 
+def _gaussian_window(window_size, sigma, channel, dtype, device):
+    coords = torch.arange(window_size, dtype=dtype, device=device) - window_size // 2
+    g = torch.exp(-(coords ** 2) / (2 * sigma * sigma))
+    g = g / g.sum()
+    kernel_2d = (g.unsqueeze(1) * g.unsqueeze(0)).unsqueeze(0).unsqueeze(0)
+    return kernel_2d.expand(channel, 1, window_size, window_size).contiguous()
+
+
+def _ssim_components(x, y, window, data_range, K=(0.01, 0.03)):
+    """Return (cs, ssim) maps averaged over spatial dims → [N, C]."""
+    pad = window.shape[-1] // 2
+    channel = x.shape[1]
+    mu1 = F.conv2d(x, window, padding=pad, groups=channel)
+    mu2 = F.conv2d(y, window, padding=pad, groups=channel)
+    mu1_sq, mu2_sq, mu12 = mu1 * mu1, mu2 * mu2, mu1 * mu2
+    sigma1_sq = F.conv2d(x * x, window, padding=pad, groups=channel) - mu1_sq
+    sigma2_sq = F.conv2d(y * y, window, padding=pad, groups=channel) - mu2_sq
+    sigma12 = F.conv2d(x * y, window, padding=pad, groups=channel) - mu12
+    C1 = (K[0] * data_range) ** 2
+    C2 = (K[1] * data_range) ** 2
+    cs_map = (2 * sigma12 + C2) / (sigma1_sq + sigma2_sq + C2)
+    ssim_map = ((2 * mu12 + C1) / (mu1_sq + mu2_sq + C1)) * cs_map
+    # Avoid torch.prod JIT issues on some CUDA toolchains: reduce with mean.
+    return cs_map.mean(dim=(-2, -1)), ssim_map.mean(dim=(-2, -1))
+
+
+class MSSSIMLoss(nn.Module):
+    """Differentiable 1 - MS-SSIM on RGB (Zhao et al. Mix loss component).
+
+    Inputs are TTSR tensors in [-1, 1]; internally mapped to [0, 1].
+    Implemented without ``torch.prod`` (nvrtc/arch issues on this stack).
+    """
+
+    def __init__(self, data_range=1.0, win_size=11, weights=None):
+        super(MSSSIMLoss, self).__init__()
+        self.data_range = data_range
+        self.win_size = win_size
+        if weights is None:
+            weights = [0.0448, 0.2856, 0.3001, 0.2363, 0.1333]
+        self.register_buffer(
+            'weights', torch.tensor(weights, dtype=torch.float32),
+            persistent=False)
+
+    def forward(self, sr, hr):
+        x = ((sr + 1.) * 0.5).clamp(0., 1.)
+        y = ((hr + 1.) * 0.5).clamp(0., 1.)
+        channel = x.shape[1]
+        win = self.win_size
+        if min(x.shape[-2:]) <= 160:
+            win = min(win, 7)
+        window = _gaussian_window(win, 1.5, channel, x.dtype, x.device)
+
+        weights = self.weights.to(device=x.device, dtype=x.dtype)
+        # Shrink levels if the crop cannot support the full pyramid.
+        levels = int(weights.numel())
+        h, w = x.shape[-2:]
+        while levels > 1 and min(h, w) // (2 ** (levels - 1)) < win:
+            levels -= 1
+        weights = weights[:levels]
+        weights = weights / weights.sum()
+
+        mcs = []
+        for i in range(levels):
+            cs, ssim = _ssim_components(x, y, window, self.data_range)
+            if i < levels - 1:
+                mcs.append(cs)
+                x = F.avg_pool2d(x, kernel_size=2, stride=2)
+                y = F.avg_pool2d(y, kernel_size=2, stride=2)
+            else:
+                # MS-SSIM = prod_i(cs_i^{w_i}) * ssim_L^{w_L}
+                # Channel-mean then batch-mean; multiply in log-space-safe loop.
+                score = ssim.clamp(min=1e-4).pow(weights[i])
+                for j, cs_j in enumerate(mcs):
+                    score = score * cs_j.clamp(min=1e-4).pow(weights[j])
+                return 1.0 - score.mean()
+        return 1.0 - ssim.mean()  # unreachable; keeps linters calm
+
+
 class TransferalPerceptualLoss(nn.Module):
     """Transferal perceptual loss for same-resolution enhancement.
     T_lv1/2/3 are at their native VGG resolutions (lv1@H×W, lv2@H/2×W/2, lv3@H/4×W/4).
@@ -269,6 +347,9 @@ def get_loss_dict_enhance(args, logger):
             'NotImplementedError: ReconstructionLoss must exist!')
     loss['rec_loss'] = ReconstructionLoss(
         type=getattr(args, 'rec_loss_type', 'l1'))
+
+    if abs(getattr(args, 'ms_ssim_w', 0.0)) > 1e-8:
+        loss['ms_ssim_loss'] = MSSSIMLoss()
 
     # Perceptual loss
     if abs(args.per_w) > 1e-8:

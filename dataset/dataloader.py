@@ -1,6 +1,30 @@
 from torch.utils.data import DataLoader
 from importlib import import_module
 import argparse
+import random
+
+import numpy as np
+import torch
+
+
+def _worker_init_fn(worker_id):
+    worker_seed = torch.initial_seed() % 2**32
+    np.random.seed(worker_seed)
+    random.seed(worker_seed)
+
+
+def _loader_kwargs(args, shuffle):
+    kw = dict(
+        batch_size=args.batch_size if shuffle else 1,
+        shuffle=shuffle,
+        num_workers=args.num_workers,
+        worker_init_fn=_worker_init_fn if int(getattr(args, 'seed', -1)) >= 0 else None,
+    )
+    if int(getattr(args, 'seed', -1)) >= 0:
+        g = torch.Generator()
+        g.manual_seed(int(args.seed))
+        kw['generator'] = g
+    return kw
 
 
 def get_dataloader(args):
@@ -9,11 +33,14 @@ def get_dataloader(args):
 
     if (args.dataset == 'CUFED'):
         data_train = getattr(m, 'TrainSet')(args)
-        dataloader_train = DataLoader(data_train, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers)
+        train_kw = _loader_kwargs(args, shuffle=True)
+        dataloader_train = DataLoader(data_train, **train_kw)
         dataloader_test = {}
         for i in range(5):
             data_test = getattr(m, 'TestSet')(args=_test_args(args), ref_level=str(i+1))
-            dataloader_test[str(i+1)] = DataLoader(data_test, batch_size=1, shuffle=False, num_workers=args.num_workers)
+            test_kw = _loader_kwargs(args, shuffle=False)
+            test_kw['batch_size'] = 1
+            dataloader_test[str(i+1)] = DataLoader(data_test, **test_kw)
         dataloader = {'train': dataloader_train, 'test': dataloader_test}
 
     elif (args.dataset in ['LOL', 'data1', 'data2', 'data1_nanobanana',
@@ -24,11 +51,14 @@ def get_dataloader(args):
                            'mixed_data1_nanobanana_lolv2']):
         data_train = getattr(m, 'TrainSet')(args)
         if len(data_train) > 0:
-            dataloader_train = DataLoader(data_train, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers)
+            train_kw = _loader_kwargs(args, shuffle=True)
+            dataloader_train = DataLoader(data_train, **train_kw)
         else:
             dataloader_train = None
         data_test = getattr(m, 'TestSet')(args=_test_args(args), ref_level='1')
-        dataloader_test = {'1': DataLoader(data_test, batch_size=1, shuffle=False, num_workers=args.num_workers)}
+        test_kw = _loader_kwargs(args, shuffle=False)
+        test_kw['batch_size'] = 1
+        dataloader_test = {'1': DataLoader(data_test, **test_kw)}
         dataloader = {'train': dataloader_train, 'test': dataloader_test}
 
     else:

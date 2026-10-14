@@ -70,9 +70,15 @@ class TrainSet(Dataset):
     def __init__(self, args, transform=None):
         if transform is None:
             transform = transforms.Compose([RandomFlip(), RandomRotate(), ToTensor()])
+        self.args = args
         self.crop_size = getattr(args, 'train_crop_size', 128)
         self.ref_degrade = getattr(args, 'ref_degrade', False)
         self.ref_gamma = getattr(args, 'ref_gamma', 1.0)
+        self.ref_photo_aug = getattr(args, 'ref_photo_aug', False)
+        self.ref_photo_aug_range = float(getattr(args, 'ref_photo_aug_range', 0.05))
+        # Full-image query gamma is always computed for data1_nanobanana so FT
+        # can pass query_gamma_override. Unused when query_illum_align=False.
+        self.compute_query_gamma = True
         if self.ref_degrade:
             self.degrader = DegradeRef(
                 color_jitter=getattr(args, 'ref_color_jitter', 0.2),
@@ -105,20 +111,34 @@ class TrainSet(Dataset):
             Ref = cv2.resize(Ref, (w, h), interpolation=cv2.INTER_LINEAR)
         Ref = apply_ref_gamma(Ref, self.ref_gamma)
 
+        # v1r6/v1r7: full-image Gamma (+ hist LUT) from Low + Nano Ref (never GT)
+        # BEFORE random crop. Applied later to the Low Query crop only.
+        # Independent Ref crop / geometric aug below is intentionally unchanged.
+        query_gamma, query_hist_lut = self._full_image_query_maps(LR, Ref)
+
         if h >= self.crop_size and w >= self.crop_size:
             LR, HR, Ref = get_patch(LR, HR, Ref, patch_size=self.crop_size)
         else:
-            LR = np.pad(
-                LR,
-                ((0, max(0, self.crop_size - h)), (0, max(0, self.crop_size - w)), (0, 0)),
-                mode='reflect')
-            HR = np.pad(
-                HR,
-                ((0, max(0, self.crop_size - h)), (0, max(0, self.crop_size - w)), (0, 0)),
-                mode='reflect')
-            Ref = HR.copy()
+            # Pad all three; never fall back to HR as Ref (nano integrity).
+            pad = ((0, max(0, self.crop_size - h)),
+                   (0, max(0, self.crop_size - w)), (0, 0))
+            LR = np.pad(LR, pad, mode='reflect')
+            HR = np.pad(HR, pad, mode='reflect')
+            Ref = np.pad(Ref, pad, mode='reflect')
 
         LR_sr, Ref_sr = LR.copy(), Ref.copy()
+
+        # Ref-only photometric jitter (does not touch Low/GT).
+        if self.ref_photo_aug and self.ref_photo_aug_range > 0:
+            r = self.ref_photo_aug_range
+            ref_f = Ref.astype(np.float32) / 255.0
+            b = 1.0 + np.random.uniform(-r, r)
+            ref_f = np.clip(ref_f * b, 0.0, 1.0)
+            s = 1.0 + np.random.uniform(-r, r)
+            gray = ref_f.mean(axis=2, keepdims=True)
+            ref_f = np.clip(gray + s * (ref_f - gray), 0.0, 1.0)
+            Ref = (ref_f * 255.0 + 0.5).astype(np.uint8)
+            Ref_sr = Ref.copy()
 
         if self.ref_degrade:
             Ref = self.degrader(Ref)
@@ -131,10 +151,33 @@ class TrainSet(Dataset):
         Ref_sr = Ref_sr.astype(np.float32) / 127.5 - 1.
 
         sample = {'LR': LR, 'LR_sr': LR_sr, 'HR': HR,
-                  'Ref': Ref, 'Ref_sr': Ref_sr}
+                  'Ref': Ref, 'Ref_sr': Ref_sr,
+                  'query_gamma': query_gamma,
+                  'query_hist_lut': query_hist_lut}
         if self.transform:
             sample = self.transform(sample)
         return sample
+
+    def _full_image_query_maps(self, lr_u8, ref_u8):
+        """Full-image gamma + hist LUT (CPU) from Low/Nano Ref uint8."""
+        from model.query_illum_align import estimate_query_align_maps
+        args = getattr(self, 'args', None)
+        gmin = float(getattr(args, 'query_gamma_min', 0.3)) if args else 0.3
+        gmax = float(getattr(args, 'query_gamma_max', 1.0)) if args else 1.0
+        alpha = float(getattr(args, 'query_illum_alpha', 0.75)) if args else 0.75
+        bins = int(getattr(args, 'query_hist_bins', 256)) if args else 256
+        # If alignment disabled, still compute gamma with alpha for LUT identity;
+        # trainer only passes overrides when align is on.
+        if args is not None and not getattr(args, 'query_illum_align', False):
+            alpha = 0.0
+        low = torch.from_numpy(
+            lr_u8.astype(np.float32).transpose(2, 0, 1) / 127.5 - 1.).unsqueeze(0)
+        ref = torch.from_numpy(
+            ref_u8.astype(np.float32).transpose(2, 0, 1) / 127.5 - 1.).unsqueeze(0)
+        with torch.no_grad():
+            g, lut, _ = estimate_query_align_maps(
+                low, ref, alpha=alpha, gamma_min=gmin, gamma_max=gmax, bins=bins)
+        return float(g.view(-1)[0].item()), lut.view(-1).cpu().numpy().astype(np.float32)
 
 
 # Evaluation for this dataset can reuse data1.TestSet, which already supports

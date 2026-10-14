@@ -115,7 +115,15 @@ class RandomFlip:
 class ToTensor:
     def __call__(self, sample):
         for k in ['LR', 'LR_sr', 'HR', 'Ref', 'Ref_sr']:
-            sample[k] = torch.from_numpy(sample[k].transpose(2, 0, 1)).float()
+            if k in sample:
+                sample[k] = torch.from_numpy(sample[k].transpose(2, 0, 1)).float()
+        # Optional per-image scalar(s) / LUT from full-image stats (v1r6/v1r7).
+        if 'query_gamma' in sample and not torch.is_tensor(sample['query_gamma']):
+            sample['query_gamma'] = torch.tensor(
+                float(sample['query_gamma']), dtype=torch.float32)
+        if 'query_hist_lut' in sample and not torch.is_tensor(sample['query_hist_lut']):
+            sample['query_hist_lut'] = torch.as_tensor(
+                sample['query_hist_lut'], dtype=torch.float32)
         return sample
 
 
@@ -211,13 +219,19 @@ class TestSet(Dataset):
         self.pairs = _collect_pairs(os.path.join(args.dataset_dir, 'Eval'),
                                     camera_filter=getattr(args, 'data1_camera', 'all'))
 
-        # Support external reference images (e.g. nanobanana-generated refs)
+        # Support external reference images (e.g. nanobanana-generated refs).
+        # Index by basename (stem) so ordering / extension differences cannot
+        # silently mis-pair refs with lows.
         self.ref_dir = getattr(args, 'ref_dir', '')
-        self.ref_files = []
+        self.ref_by_stem = {}
         if self.ref_dir and os.path.isdir(self.ref_dir):
-            self.ref_files = sorted(glob.glob(os.path.join(self.ref_dir, '*.png')))
-            if len(self.ref_files) == 0:
-                self.ref_files = sorted(glob.glob(os.path.join(self.ref_dir, '*.jpg')))
+            for path in (glob.glob(os.path.join(self.ref_dir, '*.png'))
+                         + glob.glob(os.path.join(self.ref_dir, '*.jpg'))
+                         + glob.glob(os.path.join(self.ref_dir, '*.jpeg'))):
+                stem = os.path.splitext(os.path.basename(path))[0]
+                # Prefer png over jpg if both exist
+                if stem not in self.ref_by_stem or path.lower().endswith('.png'):
+                    self.ref_by_stem[stem] = path
 
     def __len__(self):
         return len(self.pairs)
@@ -238,8 +252,9 @@ class TestSet(Dataset):
         LR, HR = LR[:h, :w, :], HR[:h, :w, :]
 
         # Load external reference image if available, otherwise use HR as Ref
-        if self.ref_files and idx < len(self.ref_files):
-            Ref = imread(self.ref_files[idx])
+        stem = os.path.splitext(os.path.basename(low_path))[0]
+        if stem in self.ref_by_stem:
+            Ref = imread(self.ref_by_stem[stem])
             # Handle RGBA → RGB
             if Ref.ndim == 3 and Ref.shape[2] == 4:
                 Ref = Ref[:, :, :3]
@@ -249,6 +264,9 @@ class TestSet(Dataset):
                 Ref = cv2.resize(Ref, (w, h), interpolation=cv2.INTER_LINEAR)
             Ref = apply_ref_gamma(Ref, self.ref_gamma)
         else:
+            if self.ref_dir:
+                raise FileNotFoundError(
+                    'Missing nanobanana ref for %s under %s' % (stem, self.ref_dir))
             Ref = HR.copy()
 
         LR_sr = LR.copy()

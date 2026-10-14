@@ -1,0 +1,7 @@
+{
+  "low_native": "960x720 jpg",
+  "nano_native": "1195x896 png (stem-matched)",
+  "eval_preprocess": "Ref resized to Low HxW via cv2.INTER_LINEAR; both cropped to multiples of 4; tiles share (y0,x0)",
+  "identity_grid": "valid after preprocess (H==Hr, W==Wr at RGB and lv3)",
+  "caveat": "Identity is a spatial prior on the resized Nano grid, not oracle GT alignment; native Nano size differs."
+}

@@ -121,8 +121,15 @@ class Trainer():
             raise RuntimeError('No trainable parameters remain after freezing')
 
         self.optimizer = optim.Adam(self.params, betas=(args.beta1, args.beta2), eps=args.eps)
-        self.scheduler = optim.lr_scheduler.StepLR(
-            self.optimizer, step_size=self.args.decay, gamma=self.args.gamma)
+        sched = getattr(args, 'lr_scheduler', 'step').lower()
+        if sched == 'cosine':
+            t_max = max(1, int(getattr(args, 'num_epochs', 1)))
+            self.scheduler = optim.lr_scheduler.CosineAnnealingLR(
+                self.optimizer, T_max=t_max,
+                eta_min=float(getattr(args, 'eta_min', 1e-7)))
+        else:
+            self.scheduler = optim.lr_scheduler.StepLR(
+                self.optimizer, step_size=self.args.decay, gamma=self.args.gamma)
         self.max_psnr = 0.
         self.max_psnr_epoch = 0
         self.max_psnr_y = 0.
@@ -156,19 +163,25 @@ class Trainer():
             sample_batched[key] = sample_batched[key].to(self.device)
         return sample_batched
 
-    def _tiled_forward(self, lr, lr_sr, ref, ref_sr, tile_size=None, overlap=None):
+    def _tiled_forward(self, lr, lr_sr, ref, ref_sr, tile_size=None, overlap=None,
+                       return_diag=False):
         """Tiled inference to avoid OOM on large images.
         Splits input into overlapping tiles, runs the model on each,
         and blends overlapping regions with a configurable window.
+
+        When query illumination alignment is enabled, gamma is estimated
+        once on the full image and reused for every tile.
 
         Args:
             lr, lr_sr, ref, ref_sr: [1, C, H, W] tensors
             tile_size: tile edge length
             overlap: overlap between adjacent tiles
+            return_diag: forward match/illum diagnostics (last tile)
 
         Returns:
             sr: [1, C, H, W] enhanced image
             S, T_lv3, T_lv2, T_lv1: aggregated (tensors from last tile)
+            optionally match_diag, query_illum_info if return_diag
         """
         tile_size = tile_size or getattr(self.args, 'tile_size', 256)
         overlap = overlap if (overlap is not None) else getattr(
@@ -176,9 +189,35 @@ class Trainer():
         overlap = max(0, min(overlap, tile_size // 2))
         window = getattr(self.args, 'tile_window', 'cosine').lower()
 
+        net = self.model.module if hasattr(self.model, 'module') else self.model
+        use_qia = getattr(self.args, 'query_illum_align', False)
+        alpha = float(getattr(self.args, 'query_illum_alpha', 0.0))
+        beta = float(getattr(self.args, 'query_hist_beta', 0.0))
+        gamma_override = None
+        lut_override = None
+        if use_qia and (alpha > 0.0 or beta > 0.0):
+            from model.query_illum_align import estimate_query_align_maps
+            # Full-image gamma + hist LUT once; reused for every tile.
+            gamma_override, lut_override, _ = estimate_query_align_maps(
+                lr_sr, ref,
+                alpha=alpha,
+                gamma_min=float(getattr(self.args, 'query_gamma_min', 0.3)),
+                gamma_max=float(getattr(self.args, 'query_gamma_max', 1.0)),
+                bins=int(getattr(self.args, 'query_hist_bins', 256)),
+            )
+
         _, _, H, W = lr.shape
+        fwd_kwargs = {}
+        if gamma_override is not None:
+            fwd_kwargs['query_gamma_override'] = gamma_override
+        if lut_override is not None and beta > 0.0:
+            fwd_kwargs['query_hist_lut_override'] = lut_override
+        if return_diag:
+            fwd_kwargs['return_diag'] = True
+
         if H <= tile_size and W <= tile_size:
-            return self.model(lr=lr, lrsr=lr_sr, ref=ref, refsr=ref_sr)
+            return self.model(lr=lr, lrsr=lr_sr, ref=ref, refsr=ref_sr,
+                              **fwd_kwargs)
 
         stride = max(1, tile_size - overlap)
         # Number of tiles in each dimension
@@ -206,10 +245,10 @@ class Trainer():
         feather = feather.view(1, 1, tile_size, tile_size)
 
         last_S, last_T3, last_T2, last_T1 = None, None, None, None
+        last_diag, last_qinfo = None, None
         # The global illumination head is a per-image transform. Run the
         # backbone per tile without it, then apply it once on the stitched
         # result so tiles cannot get mismatched gamma/gain (visible seams).
-        net = self.model.module if hasattr(self.model, 'module') else self.model
         has_illum = hasattr(net, 'apply_illum_head')
         has_refillum = hasattr(net, 'apply_ref_illum')
 
@@ -226,12 +265,17 @@ class Trainer():
                 tile_ref_sr = ref_sr[:, :, y0:y1, x0:x1]
 
                 tile_kwargs = dict(lr=tile_lr, lrsr=tile_lr_sr,
-                                   ref=tile_ref, refsr=tile_ref_sr)
+                                   ref=tile_ref, refsr=tile_ref_sr,
+                                   **fwd_kwargs)
                 if has_illum:
                     tile_kwargs['apply_illum'] = False
                 if has_refillum:
                     tile_kwargs['apply_ref_illum'] = False
-                tile_sr, S, T3, T2, T1 = self.model(**tile_kwargs)
+                out = self.model(**tile_kwargs)
+                if return_diag:
+                    tile_sr, S, T3, T2, T1, last_diag, last_qinfo = out
+                else:
+                    tile_sr, S, T3, T2, T1 = out
 
                 sr_accum[:, :, y0:y1, x0:x1] += tile_sr * feather
                 weight_accum[:, :, y0:y1, x0:x1] += feather
@@ -242,6 +286,8 @@ class Trainer():
             sr = net.apply_ref_illum(sr, lr, ref)
         if has_illum:
             sr = net.apply_illum_head(sr, lr)
+        if return_diag:
+            return sr, last_S, last_T3, last_T2, last_T1, last_diag, last_qinfo
         return sr, last_S, last_T3, last_T2, last_T1
 
     def _tta_forward(self, one_fn, lr, lr_sr, ref, ref_sr):
@@ -274,6 +320,7 @@ class Trainer():
             self.scheduler.step()
         self.logger.info('Current epoch learning rate: %e' %(self.optimizer.param_groups[0]['lr']))
 
+        epoch_rec, epoch_ms, epoch_n = 0.0, 0.0, 0
         for i_batch, sample_batched in enumerate(self.dataloader['train']):
             self.optimizer.zero_grad()
 
@@ -287,13 +334,28 @@ class Trainer():
             if not has_ref_head and hasattr(self.model, 'module'):
                 has_ref_head = hasattr(self.model.module, 'RefCorrection')
 
+            # Full-image gamma / hist LUT from the dataset (v1r6/v1r7).
+            # Used only when Query illum align is enabled; MainNet sees raw `lr`.
+            fwd_extra = {}
+            if getattr(self.args, 'query_illum_align', False):
+                alpha = float(getattr(self.args, 'query_illum_alpha', 0.0))
+                beta = float(getattr(self.args, 'query_hist_beta', 0.0))
+                if (alpha > 0.0 or beta > 0.0) and 'query_gamma' in sample_batched:
+                    fwd_extra['query_gamma_override'] = sample_batched[
+                        'query_gamma'].view(-1)
+                if beta > 0.0 and 'query_hist_lut' in sample_batched:
+                    lut = sample_batched['query_hist_lut']
+                    if lut.ndim == 1:
+                        lut = lut.view(1, -1)
+                    fwd_extra['query_hist_lut_override'] = lut
+
             if has_ref_head:
                 model_out = self.model(lr=lr, lrsr=lr_sr, ref=ref, refsr=ref_sr,
-                                       return_ref=True)
+                                       return_ref=True, **fwd_extra)
                 sr, S, T_lv3, T_lv2, T_lv1, ref_corrected = model_out
             else:
                 sr, S, T_lv3, T_lv2, T_lv1 = self.model(
-                    lr=lr, lrsr=lr_sr, ref=ref, refsr=ref_sr)
+                    lr=lr, lrsr=lr_sr, ref=ref, refsr=ref_sr, **fwd_extra)
                 ref_corrected = None
 
             ### calc loss
@@ -301,12 +363,22 @@ class Trainer():
 
             rec_loss = self.args.rec_w * self.loss_all['rec_loss'](sr, hr)
             loss = rec_loss
+            epoch_rec += float(rec_loss.item())
+            epoch_n += 1
             if (is_print):
                 self.logger.info( ('init ' if is_init else '') + 'epoch: ' + str(current_epoch) + 
                     '\t batch: ' + str(i_batch+1) )
                 self.logger.info( 'rec_loss: %.10f' %(rec_loss.item()) )
 
             if (not is_init):
+                if ('ms_ssim_loss' in self.loss_all):
+                    ms_ssim_loss = (getattr(self.args, 'ms_ssim_w', 0.0)
+                                    * self.loss_all['ms_ssim_loss'](sr, hr))
+                    loss += ms_ssim_loss
+                    epoch_ms += float(ms_ssim_loss.item())
+                    if (is_print):
+                        self.logger.info('ms_ssim_loss: %.10f'
+                                         % (ms_ssim_loss.item()))
                 if ('per_loss' in self.loss_all):
                     sr_relu5_1 = self.vgg19((sr + 1.) / 2.)
                     with torch.no_grad():
@@ -362,6 +434,11 @@ class Trainer():
             loss.backward()
             self.optimizer.step()
 
+        if epoch_n > 0:
+            self.logger.info(
+                'epoch %d train_avg  rec_loss: %.6f  ms_ssim_loss: %.6f  (n=%d)'
+                % (current_epoch, epoch_rec / epoch_n, epoch_ms / epoch_n, epoch_n))
+
         if ((not is_init) and current_epoch % self.args.save_every == 0):
             self.logger.info('saving the model...')
             tmp = self.model.state_dict()
@@ -416,11 +493,15 @@ class Trainer():
 
                 psnr_ave, ssim_ave = psnr / cnt, ssim / cnt
                 mse_ave, lpips_ave = mse / cnt, lpips / cnt
-                self.logger.info('%s  PSNR: %.3f  PSNRy: %.3f  SSIM: %.4f  LPIPS: %.4f  MSE: %.2f' %(self.args.dataset, psnr_rgb / cnt, psnr_ave, ssim_ave, lpips_ave, mse_ave))
+                self.logger.info(
+                    '%s  PSNR: %.3f  SSIM: %.4f  LPIPS: %.4f  MSE: %.2f  (PSNR/SSIM=RGB)'
+                    % (self.args.dataset, psnr_rgb / cnt, ssim_ave, lpips_ave, mse_ave))
                 if do_align:
-                    self.logger.info('%s  PSNR(mean-aligned): %.3f  PSNRy(mean-aligned): %.3f  SSIM(mean-aligned): %.4f  LPIPS(mean-aligned): %.4f  MSE(mean-aligned): %.2f'
-                                     % (self.args.dataset, ap_psnr_rgb / cnt, ap_psnr / cnt, ap_ssim / cnt,
-                                        ap_lpips / cnt, ap_mse / cnt))
+                    self.logger.info(
+                        '%s  PSNR(mean-aligned): %.3f  SSIM(mean-aligned): %.4f  '
+                        'LPIPS(mean-aligned): %.4f  MSE(mean-aligned): %.2f  (RGB)'
+                        % (self.args.dataset, ap_psnr_rgb / cnt, ap_ssim / cnt,
+                           ap_lpips / cnt, ap_mse / cnt))
                 if (psnr_rgb / cnt > self.max_psnr):
                     self.max_psnr = psnr_rgb / cnt
                     self.max_psnr_epoch = current_epoch
@@ -430,9 +511,8 @@ class Trainer():
                 if (ssim_ave > self.max_ssim):
                     self.max_ssim = ssim_ave
                     self.max_ssim_epoch = current_epoch
-                self.logger.info('%s  PSNR(max): %.3f (%d)  PSNRy(max): %.3f (%d)  SSIM(max): %.4f (%d)'
+                self.logger.info('%s  PSNR(max): %.3f (%d)  SSIM(max): %.4f (%d)'
                     %(self.args.dataset, self.max_psnr, self.max_psnr_epoch,
-                      self.max_psnr_y, self.max_psnr_y_epoch,
                       self.max_ssim, self.max_ssim_epoch))
 
         else:
@@ -444,6 +524,7 @@ class Trainer():
                 ap_psnr, ap_psnr_rgb, ap_ssim, ap_mse, ap_lpips = 0., 0., 0., 0., 0.
                 do_align = getattr(self.args, 'eval_mean_align', True)
                 cg = getattr(self.args, 'eval_chroma_gain', 1.0)
+                per_image = []
                 for i_batch, sample_batched in enumerate(self.dataloader['test']['1']):
                     cnt += 1
                     sample_batched = self.prepare(sample_batched)
@@ -470,7 +551,6 @@ class Trainer():
                         imsave(os.path.join(self.args.save_dir, 'save_results',
                                             str(i_batch).zfill(5) + '.png'),
                                sr_save)
-                        # Also save low-light input for comparison
                         lr_save = (lr + 1.) * 127.5
                         lr_save = np.transpose(
                             lr_save.squeeze().round().cpu().numpy(),
@@ -479,7 +559,6 @@ class Trainer():
                                             str(i_batch).zfill(5) + '_input.png'),
                                lr_save)
 
-                    # Calculate PSNR, SSIM, MSE, LPIPS
                     _psnr, _ssim, _mse, _psnr_rgb = calc_psnr_and_ssim(sr.detach(), hr.detach())
                     _lpips = self.lpips_fn(sr, hr).item()
                     psnr += _psnr
@@ -487,6 +566,11 @@ class Trainer():
                     mse += _mse
                     lpips += _lpips
                     psnr_rgb += _psnr_rgb
+                    per_image.append({
+                        'idx': i_batch,
+                        'psnr_rgb': float(_psnr_rgb),
+                        'ssim_rgb': float(_ssim),
+                    })
                     if do_align:
                         sr_al = mean_align(sr, hr)
                         a_p, a_s, a_m, a_prgb = calc_psnr_and_ssim(sr_al.detach(), hr.detach())
@@ -500,12 +584,19 @@ class Trainer():
                 ssim_ave = ssim / cnt
                 mse_ave = mse / cnt
                 lpips_ave = lpips / cnt
-                self.logger.info('%s  PSNR: %.3f  PSNRy: %.3f  SSIM: %.4f  LPIPS: %.4f  MSE: %.2f'
-                                 % (self.args.dataset, psnr_rgb / cnt, psnr_ave, ssim_ave, lpips_ave, mse_ave))
+                self.logger.info(
+                    '%s  PSNR: %.3f  SSIM: %.4f  LPIPS: %.4f  MSE: %.2f  (PSNR/SSIM=RGB)'
+                    % (self.args.dataset, psnr_rgb / cnt, ssim_ave, lpips_ave, mse_ave))
                 if do_align:
-                    self.logger.info('%s  PSNR(mean-aligned): %.3f  PSNRy(mean-aligned): %.3f  SSIM(mean-aligned): %.4f  LPIPS(mean-aligned): %.4f  MSE(mean-aligned): %.2f'
-                                     % (self.args.dataset, ap_psnr_rgb / cnt, ap_psnr / cnt, ap_ssim / cnt,
-                                        ap_lpips / cnt, ap_mse / cnt))
+                    self.logger.info(
+                        '%s  PSNR(mean-aligned): %.3f  SSIM(mean-aligned): %.4f  '
+                        'LPIPS(mean-aligned): %.4f  MSE(mean-aligned): %.2f  (RGB)'
+                        % (self.args.dataset, ap_psnr_rgb / cnt, ap_ssim / cnt,
+                           ap_lpips / cnt, ap_mse / cnt))
+                if getattr(self.args, 'eval_per_image', False):
+                    self._save_per_image_eval(
+                        self.args.dataset, current_epoch, per_image,
+                        float(psnr_rgb / cnt), float(ssim_ave))
                 if psnr_rgb / cnt > self.max_psnr:
                     self.max_psnr = psnr_rgb / cnt
                     self.max_psnr_epoch = current_epoch
@@ -515,13 +606,27 @@ class Trainer():
                 if ssim_ave > self.max_ssim:
                     self.max_ssim = ssim_ave
                     self.max_ssim_epoch = current_epoch
-                self.logger.info('%s  PSNR(max): %.3f (%d)  PSNRy(max): %.3f (%d)  SSIM(max): %.4f (%d)'
+                self.logger.info('%s  PSNR(max): %.3f (%d)  SSIM(max): %.4f (%d)'
                                  % (self.args.dataset, self.max_psnr, self.max_psnr_epoch,
-                                    self.max_psnr_y, self.max_psnr_y_epoch,
                                     self.max_ssim, self.max_ssim_epoch))
 
         self._evaluate_extra_tests(current_epoch)
         self.logger.info('Evaluation over.')
+
+    def _save_per_image_eval(self, name, epoch, per_image, psnr_mean, ssim_mean):
+        import json
+        out_dir = os.path.join(self.args.save_dir, 'per_image_eval')
+        os.makedirs(out_dir, exist_ok=True)
+        path = os.path.join(out_dir, '%s_e%05d.json' % (name, int(epoch)))
+        with open(path, 'w') as f:
+            json.dump({
+                'name': name,
+                'epoch': int(epoch),
+                'psnr_rgb_mean': psnr_mean,
+                'ssim_rgb_mean': ssim_mean,
+                'per_image': per_image,
+            }, f, indent=2)
+        self.logger.info('Wrote per-image eval: %s' % path)
 
     def _evaluate_extra_tests(self, current_epoch=0):
         """Evaluate extra validation sets, such as data1 during finetune."""
@@ -581,33 +686,36 @@ class Trainer():
             ssim_ave = ssim / cnt
             mse_ave = mse / cnt
             lpips_ave = lpips / cnt
-            self.logger.info('%s  PSNR: %.3f  PSNRy: %.3f  SSIM: %.4f  LPIPS: %.4f  MSE: %.2f'
-                             % (name, psnr_rgb / cnt, psnr_ave, ssim_ave, lpips_ave, mse_ave))
+            self.logger.info(
+                '%s  PSNR: %.3f  SSIM: %.4f  LPIPS: %.4f  MSE: %.2f  (PSNR/SSIM=RGB)'
+                % (name, psnr_rgb / cnt, ssim_ave, lpips_ave, mse_ave))
             if do_align:
-                self.logger.info('%s  PSNR(mean-aligned): %.3f  PSNRy(mean-aligned): %.3f  SSIM(mean-aligned): %.4f  LPIPS(mean-aligned): %.4f  MSE(mean-aligned): %.2f'
-                                 % (name, ap_psnr_rgb / cnt, ap_psnr / cnt, ap_ssim / cnt,
-                                    ap_lpips / cnt, ap_mse / cnt))
+                self.logger.info(
+                    '%s  PSNR(mean-aligned): %.3f  SSIM(mean-aligned): %.4f  '
+                    'LPIPS(mean-aligned): %.4f  MSE(mean-aligned): %.2f  (RGB)'
+                    % (name, ap_psnr_rgb / cnt, ap_ssim / cnt,
+                       ap_lpips / cnt, ap_mse / cnt))
 
             if name == 'data1':
-                self.data1_last_psnr = psnr_ave
+                self.data1_last_psnr = psnr_rgb / cnt
 
             if name == 'data1_nanobanana_huawei':
                 floor = getattr(self.args, 'data1_nanobanana_huawei_floor', 20.4)
                 if (getattr(self.args, 'early_stop_on_data1', False)
-                        and psnr_ave < floor):
+                        and (psnr_rgb / cnt) < floor):
                     self.data1_psnr_floor_violated = True
                     self.logger.info(
-                        'EARLY STOP: data1_nanobanana_huawei PSNRy %.3f < floor %.3f'
-                        % (psnr_ave, floor))
+                        'EARLY STOP: data1_nanobanana_huawei PSNR(RGB) %.3f < floor %.3f'
+                        % (psnr_rgb / cnt, floor))
 
             if name == 'data1_nanobanana_nikon':
                 floor = getattr(self.args, 'data1_nanobanana_nikon_floor', 17.0)
                 if (getattr(self.args, 'early_stop_on_data1', False)
-                        and psnr_ave < floor):
+                        and (psnr_rgb / cnt) < floor):
                     self.data1_psnr_floor_violated = True
                     self.logger.info(
-                        'EARLY STOP: data1_nanobanana_nikon PSNRy %.3f < floor %.3f'
-                        % (psnr_ave, floor))
+                        'EARLY STOP: data1_nanobanana_nikon PSNR(RGB) %.3f < floor %.3f'
+                        % (psnr_rgb / cnt, floor))
 
     def test(self):
         self.logger.info('Test process...')
