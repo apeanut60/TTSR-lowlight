@@ -1,0 +1,32 @@
+{
+  "gate_formula": "G = sigmoid(bicubic_upsample(S, MainNet_HW))",
+  "same_G_all_stages": true,
+  "injection_order": [
+    "concat(stream, T_up)",
+    "conv*_head \u2192 residual",
+    "residual *= G",
+    "stream += gated residual",
+    "RB / CSFI / merge / illum"
+  ],
+  "smooth_kernel": 31,
+  "g4_shifts": {
+    "G4a": [
+      32,
+      0
+    ],
+    "G4b": [
+      0,
+      32
+    ],
+    "G4c": [
+      24,
+      24
+    ]
+  },
+  "m1_frozen": {
+    "alpha": 0.75,
+    "beta": 0.5,
+    "lambda": 0.25,
+    "s_source_G0": "a0"
+  }
+}

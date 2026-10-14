@@ -1,0 +1,14 @@
+{
+  "command": "python tests/test_v1r10_s_gate_audit.py",
+  "result": "ALL PASS",
+  "checks": [
+    "G0 default path matches sigmoid(bicubic_upsample(S)); collect_gate_stats does not change SR",
+    "Identical T_mix for s_source=a0 vs b2 at fixed lambda",
+    "G2 zero spatial variance; mean equals mean(G_A0)",
+    "G3 preserves mean within 1e-4; reduces spatial std",
+    "G4 preserves sorted value distribution under circular shifts",
+    "Gates finite and in [0,1]; checkpoint tensors unchanged after forwards",
+    "MainNet receives original Low (not Query)",
+    "Eval G0 reproduces v1r9 M1 within 0.02 dB (20.1805 vs 20.181)"
+  ]
+}

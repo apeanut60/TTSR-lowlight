@@ -113,6 +113,15 @@ parser.add_argument('--texture_fusion_lambda', type=float, default=0.0,
                     help='Identity blend weight in [0,1]: T=(1-λ)T_B2 + λ T_id')
 parser.add_argument('--texture_fusion_s_source', type=str, default='a0',
                     help='Soft-attention source when texture_fusion is on: a0 | b2 | search')
+parser.add_argument('--gate_mode', type=str, default=None,
+                    help='v1r10 eval-only gate transform after sigmoid(upsample(S)): '
+                         'None|constant_mean|smooth|shift. Default None = production')
+parser.add_argument('--gate_shift', type=str, default='',
+                    help='v1r10: "dy,dx" circular shift for gate_mode=shift')
+parser.add_argument('--gate_smooth_kernel', type=int, default=31,
+                    help='v1r10: odd avg-pool kernel for gate_mode=smooth')
+parser.add_argument('--collect_gate_stats', type=str2bool, default=False,
+                    help='v1r10: record residual/gate diagnostics (no output change)')
 parser.add_argument('--eval_per_image', type=str2bool, default=False,
                     help='During eval, also write per-image RGB PSNR/SSIM JSON under save_dir')
 parser.add_argument('--illum_match_w', type=float, default=0.0,

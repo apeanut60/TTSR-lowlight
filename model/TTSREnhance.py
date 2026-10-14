@@ -83,7 +83,9 @@ class TTSREnhance(nn.Module):
     def forward(self, lr=None, lrsr=None, ref=None, refsr=None, sr=None,
                 return_ref=False, apply_illum=True, apply_ref_illum=True,
                 return_diag=False, query_gamma_override=None,
-                query_hist_lut_override=None):
+                query_hist_lut_override=None,
+                gate_mode=None, gate_shift=None, gate_smooth_kernel=None,
+                collect_gate_stats=False):
         if (type(sr) != type(None)):
             # Used in transferal perceptual loss
             self.LTE_copy.load_state_dict(self.LTE.state_dict())
@@ -229,10 +231,36 @@ class TTSREnhance(nn.Module):
             else:
                 S, T_lv3, T_lv2, T_lv1 = st_out
 
+        # Eval-only gate counterfactuals (v1r10). Defaults leave G unchanged.
+        if gate_mode is None:
+            gate_mode = getattr(self.args, 'gate_mode', None)
+        if gate_shift is None:
+            gate_shift = getattr(self.args, 'gate_shift', None)
+        if isinstance(gate_shift, str):
+            gate_shift = gate_shift.strip()
+            if gate_shift == '':
+                gate_shift = None
+            else:
+                parts = [int(p) for p in gate_shift.replace(' ', '').split(',')]
+                if len(parts) != 2:
+                    raise ValueError('gate_shift must be "dy,dx", got %r' %
+                                     gate_shift)
+                gate_shift = (parts[0], parts[1])
+        if gate_smooth_kernel is None:
+            gate_smooth_kernel = int(
+                getattr(self.args, 'gate_smooth_kernel', 31))
+        if not collect_gate_stats:
+            collect_gate_stats = bool(
+                getattr(self.args, 'collect_gate_stats', False))
+
         # MainNetEnhance at 1:1 resolution (original Low, not low_query)
-        sr = self.MainNet(lr, S, T_lv3, T_lv2, T_lv1,
-                          apply_illum=apply_illum, ref=ref_input,
-                          apply_ref_illum=apply_ref_illum)
+        sr = self.MainNet(
+            lr, S, T_lv3, T_lv2, T_lv1,
+            apply_illum=apply_illum, ref=ref_input,
+            apply_ref_illum=apply_ref_illum,
+            gate_mode=gate_mode, gate_shift=gate_shift,
+            gate_smooth_kernel=gate_smooth_kernel,
+            collect_gate_stats=collect_gate_stats)
 
         if return_ref:
             out = (sr, S, T_lv3, T_lv2, T_lv1, ref_input)

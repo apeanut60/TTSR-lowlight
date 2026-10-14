@@ -326,8 +326,58 @@ class MainNetEnhance(nn.Module):
         x = torch.clamp(x * gain + bias, -1, 1)
         return x
 
+    @staticmethod
+    def build_gate_from_S(S, size_hw):
+        """G = sigmoid(bicubic_upsample(S)) — production gate definition."""
+        S_up = F.interpolate(S, size=size_hw, mode='bicubic')
+        return torch.sigmoid(S_up)
+
+    @staticmethod
+    def apply_gate_transform(G, gate_mode=None, gate_shift=None,
+                             smooth_kernel=31):
+        """Eval-only counterfactual transforms on the upsampled sigmoid gate.
+
+        Default ``gate_mode is None`` returns G unchanged (production path).
+        """
+        if gate_mode is None or gate_mode in ('default', 'a0', 'none', ''):
+            return G
+        if gate_mode == 'constant_mean':
+            # Per-tile / per-batch spatial mean of G (already sigmoid+upsample).
+            # Not sigmoid(mean(S)).
+            return G.mean(dim=(2, 3), keepdim=True).expand_as(G)
+        if gate_mode == 'smooth':
+            k = int(smooth_kernel)
+            if k % 2 == 0:
+                raise ValueError('smooth_kernel must be odd, got %d' % k)
+            pad = k // 2
+            # Fixed avg-pool low-pass; restore per-sample mean; clamp to [0,1].
+            g_s = F.avg_pool2d(G, kernel_size=k, stride=1, padding=pad)
+            mean_g = G.mean(dim=(2, 3), keepdim=True)
+            mean_s = g_s.mean(dim=(2, 3), keepdim=True)
+            g_s = g_s + (mean_g - mean_s)
+            return g_s.clamp(0.0, 1.0)
+        if gate_mode == 'shift':
+            if gate_shift is None:
+                raise ValueError('gate_mode=shift requires gate_shift=(dy,dx)')
+            dy, dx = int(gate_shift[0]), int(gate_shift[1])
+            return torch.roll(G, shifts=(dy, dx), dims=(2, 3))
+        raise ValueError('Unknown gate_mode %r' % (gate_mode,))
+
     def forward(self, x, S=None, T_lv3=None, T_lv2=None, T_lv1=None,
-                apply_illum=True, ref=None, apply_ref_illum=True):
+                apply_illum=True, ref=None, apply_ref_illum=True,
+                gate_mode=None, gate_shift=None, gate_smooth_kernel=31,
+                collect_gate_stats=False):
+        """
+        Soft-attention order at each injection stage (confirmed):
+          1) concat(stream, T_*_up)
+          2) conv*_head → residual
+          3) residual *= G   (same G for stages 1–3)
+          4) stream += gated residual
+          5) subsequent RBs / CSFI / merge / illum heads
+
+        ``gate_mode`` / ``gate_shift`` are eval-only; default None is bit-
+        compatible with the original gate path when collect_gate_stats=False.
+        """
         low_input = x
         # Shallow feature extraction
         x = self.SFE(x)  # [N, n_feats, H, W]
@@ -340,15 +390,37 @@ class MainNetEnhance(nn.Module):
         T_lv3_up = F.interpolate(T_lv3, size=(H, W), mode='bicubic')
         T_lv2_up = F.interpolate(T_lv2, size=(H, W), mode='bicubic')
         T_lv1_up = F.interpolate(T_lv1, size=(H, W), mode='bicubic')
-        S_up = F.interpolate(S, size=(H, W), mode='bicubic')
-        S_up = torch.sigmoid(S_up)  # [0,1] soft-gate, consistent with tpl_loss
+        G0 = self.build_gate_from_S(S, (H, W))
+        S_up = self.apply_gate_transform(
+            G0, gate_mode=gate_mode, gate_shift=gate_shift,
+            smooth_kernel=gate_smooth_kernel)
+
+        stage_stats = [] if collect_gate_stats else None
+
+        def _inject(stream, T_up, head_conv, tag):
+            res_pre = head_conv(torch.cat((stream, T_up), dim=1))
+            res_post = res_pre * S_up
+            if stage_stats is not None:
+                with torch.no_grad():
+                    n_pre = res_pre.detach().float().norm(dim=1)
+                    n_post = res_post.detach().float().norm(dim=1)
+                    stage_stats.append({
+                        'stage': tag,
+                        'res_norm_pre_mean': float(n_pre.mean().item()),
+                        'res_norm_post_mean': float(n_post.mean().item()),
+                        'rel_inject': float(
+                            (n_post.mean() /
+                             n_pre.mean().clamp(min=1e-8)).item()),
+                        'res_post_spatial_cv': float(
+                            (n_post.std(unbiased=False) /
+                             n_post.mean().clamp(min=1e-8)).item()),
+                        'res_post_map': n_post[0].cpu(),  # [H,W] for viz
+                    })
+            return stream + res_post
 
         # ── Stage1 ──
         x11 = x
-        x11_res = torch.cat((x11, T_lv3_up), dim=1)
-        x11_res = self.conv11_head(x11_res)
-        x11_res = x11_res * S_up
-        x11 = x11 + x11_res
+        x11 = _inject(x11, T_lv3_up, self.conv11_head, 'stage1_Tlv3')
 
         x11_res = x11
         for i in range(self.num_res_blocks[1]):
@@ -362,10 +434,7 @@ class MainNetEnhance(nn.Module):
         x22 = x
 
         # Soft-attention: inject T_lv2
-        x22_res = torch.cat((x22, T_lv2_up), dim=1)
-        x22_res = self.conv22_head(x22_res)
-        x22_res = x22_res * S_up
-        x22 = x22 + x22_res
+        x22 = _inject(x22, T_lv2_up, self.conv22_head, 'stage2_Tlv2')
 
         x22_res = x22
 
@@ -389,10 +458,7 @@ class MainNetEnhance(nn.Module):
         x33 = x
 
         # Soft-attention: inject T_lv1
-        x33_res = torch.cat((x33, T_lv1_up), dim=1)
-        x33_res = self.conv33_head(x33_res)
-        x33_res = x33_res * S_up
-        x33 = x33 + x33_res
+        x33 = _inject(x33, T_lv1_up, self.conv33_head, 'stage3_Tlv1')
 
         x33_res = x33
 
@@ -422,4 +488,30 @@ class MainNetEnhance(nn.Module):
         if apply_illum:
             x = self.apply_illum_head(x, low_input)
 
+        # Diagnostics (not part of checkpoint / not used in training)
+        self.last_gate = S_up.detach()
+        self.last_gate_pre_transform = G0.detach()
+        self.last_gate_stats = None
+        if collect_gate_stats:
+            with torch.no_grad():
+                g = S_up.detach().float()
+                g0 = G0.detach().float()
+                self.last_gate_stats = {
+                    'G_mean': float(g.mean().item()),
+                    'G_std': float(g.std(unbiased=False).item()),
+                    'G_cv': float(
+                        (g.std(unbiased=False) /
+                         g.mean().clamp(min=1e-8)).item()),
+                    'G0_mean': float(g0.mean().item()),
+                    'G0_std': float(g0.std(unbiased=False).item()),
+                    'G_min': float(g.min().item()),
+                    'G_max': float(g.max().item()),
+                    'stages': [
+                        {k: v for k, v in s.items() if k != 'res_post_map'}
+                        for s in stage_stats
+                    ],
+                    'stage_maps': {
+                        s['stage']: s['res_post_map'] for s in stage_stats
+                    },
+                }
         return x

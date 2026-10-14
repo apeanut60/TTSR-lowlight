@@ -156,25 +156,23 @@ def _err_map(pred, gt):
     return (p - g).abs().mean(0).cpu().numpy()
 
 
+def _as01(x):
+    return ((x + 1) * 0.5).clamp(0, 1)
+
+
 def _luma_mae(pred, gt):
-    return float((_rgb_luma01(pred) - _rgb_luma01(gt)).abs().mean().item())
+    return float((_rgb_luma01(_as01(pred)) - _rgb_luma01(_as01(gt))).abs().mean().item())
 
 
 def _luma_bias(pred, gt):
-    return float((_rgb_luma01(pred) - _rgb_luma01(gt)).mean().item())
+    """Signed mean (Y_sr − Y_gt) in [0,1] luma space."""
+    return float((_rgb_luma01(_as01(pred)) - _rgb_luma01(_as01(gt))).mean().item())
 
 
 def _chroma_mae(pred, gt):
-    p = ((pred + 1) * 0.5).clamp(0, 1)
-    g = ((gt + 1) * 0.5).clamp(0, 1)
+    p, g = _as01(pred), _as01(gt)
     yp, yg = _rgb_luma01(p), _rgb_luma01(g)
     return float(((p - yp) - (g - yg)).abs().mean().item())
-
-
-def _mse_rgb(pred, gt):
-    p = ((pred + 1) * 127.5).clamp(0, 255)
-    g = ((gt + 1) * 127.5).clamp(0, 255)
-    return float(((p - g) ** 2).mean().item())
 
 
 def _resize_max(t, max_side=512):
