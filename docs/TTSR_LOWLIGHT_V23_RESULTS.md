@@ -11,7 +11,7 @@ Eval30 has been reused across v1/v2 rounds — **not** an independent test set. 
 
 | Item | Value |
 |---|---|
-| Branch | `experiment/ttsr-lowlight-v23` |
+| Branch | `experiment/ttsr-lowlight-v23` (`8d6547e`) |
 | Exp dir | `/root/data/experiments/TTSR-lowlight-v23/` |
 | Init | H3@2000 `…/v2/…/H3_v3b0_s42/checkpoint_02000.pt` |
 | P2 | Frozen; float32 Y0 Train500/Eval30 caches |
