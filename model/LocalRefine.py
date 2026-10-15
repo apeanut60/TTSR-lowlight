@@ -112,7 +112,10 @@ class LocalSoftMatch(nn.Module):
             p = torch.softmax(logit, dim=1)              # over the 81 candidates
             t = torch.einsum('bjn,bcjn->bcn', p, vr).reshape(B, C, h, w)
         else:
-            t = f0.new_empty(B, C, n)
+            # Concatenate chunk outputs so autograd stays intact.
+            # In-place writes into a preallocated tensor break gradients through
+            # Q/K/V when training Matcher/Encoder (v2.3). Semantics unchanged.
+            parts = []
             for s in range(0, n, self.chunk):
                 e = min(s + self.chunk, n)
                 fl = flat[s:e]                            # [c,81]
@@ -122,8 +125,8 @@ class LocalSoftMatch(nn.Module):
                 logit = torch.einsum('bcm,bcjm->bjm', qc, kr) / self.tau
                 logit = logit.masked_fill(~valid_t[:, s:e][None], float('-inf'))
                 p = torch.softmax(logit, dim=1)
-                t[:, :, s:e] = torch.einsum('bjm,bcjm->bcm', p, vr)
-            t = t.reshape(B, C, h, w)
+                parts.append(torch.einsum('bjm,bcjm->bcm', p, vr))
+            t = torch.cat(parts, dim=2).reshape(B, C, h, w)
         return t
 
 
