@@ -26,7 +26,7 @@ python main.py \
     --data1_camera Huawei \
     --ref_dir "$EVAL_H" \
     --nanobanana_ref_subdir nanobanana_ref \
-    --nanobanana_manifest_dir /root/data/datasets/data1/.nanobanana_sample_manifest \
+    --nanobanana_manifest_dir /root/data/datasets/data1/.nanobanana_sample_manifest_500 \
     --save_dir "$SAVE_DIR" \
     --reset True \
     --log_file_name "train_v1r7_ft_B2_${TAG}.log" \

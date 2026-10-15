@@ -9,6 +9,10 @@ Uses the nanobanana-generated references stored inside the data1 training tree:
 The reference is mapped to each low input by exact basename, so it does not
 depend on sorted-list index alignment and will never use the unrelated
 `data2/ref` directory.
+
+Default training subset (``--nanobanana_manifest_dir``) is the 500-per-camera
+list under ``.nanobanana_sample_manifest_500/``. Pass an empty manifest dir to
+use every on-disk Nano triplet; legacy 250/271 manifests remain available.
 """
 
 import os

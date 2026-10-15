@@ -13,7 +13,7 @@ SEED="${3:-42}"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 SAVE_DIR="/root/data/experiments/retry/SOTA-Nano-${EXP_NAME}"
 PRETRAIN="/root/data/experiments/retry/TTSR-lowlight-v1r3-nano-Huawei/model/model_00004.pt"
-MANIFEST="/root/data/datasets/data1/.nanobanana_sample_manifest_full"
+MANIFEST="/root/data/datasets/data1/.nanobanana_sample_manifest_500"
 EVAL_H="/root/data/datasets/data1/Eval/Huawei/nanobanana_ref"
 N_TRAIN="$(wc -l < "$MANIFEST/Huawei.txt" | tr -d ' ')"
 

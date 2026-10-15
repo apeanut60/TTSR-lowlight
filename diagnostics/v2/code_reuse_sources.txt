@@ -1,0 +1,4 @@
+HIST_COMMIT=d3c4bd9571b723f0ee3f3e7a63e6054534e8ae39
+HIST_REPO=/root/projects/TTSR-lowlight (github apeanut60/TTSR-lowlight @ v5)
+CUR_COMMIT=7e1f0ab56b5e2bae9cb08a1477c9833dfb08e800
+CUR_BRANCH=experiment/ttsr-lowlight-v2

@@ -122,6 +122,20 @@ parser.add_argument('--gate_smooth_kernel', type=int, default=31,
                     help='v1r10: odd avg-pool kernel for gate_mode=smooth')
 parser.add_argument('--collect_gate_stats', type=str2bool, default=False,
                     help='v1r10: record residual/gate diagnostics (no output change)')
+parser.add_argument('--disable_T_lv3', type=str2bool, default=False,
+                    help='v1r11 eval-only: zero T_lv3 before stage-1 residual')
+parser.add_argument('--disable_T_lv2', type=str2bool, default=False,
+                    help='v1r11 eval-only: zero T_lv2 before stage-2 residual')
+parser.add_argument('--disable_T_lv1', type=str2bool, default=False,
+                    help='v1r11 eval-only: zero T_lv1 before stage-3 residual')
+parser.add_argument('--stage_mode_lv3', type=str, default=None,
+                    help='v1r12: normal|texture_zero|branch_bypass for lv3')
+parser.add_argument('--stage_mode_lv2', type=str, default=None,
+                    help='v1r12: normal|texture_zero|branch_bypass for lv2')
+parser.add_argument('--stage_mode_lv1', type=str, default=None,
+                    help='v1r12: normal|texture_zero|branch_bypass for lv1')
+parser.add_argument('--collect_residual_decomp', type=str2bool, default=False,
+                    help='v1r12: record R(F,T)/R(F,0)/R_texture local decomp')
 parser.add_argument('--eval_per_image', type=str2bool, default=False,
                     help='During eval, also write per-image RGB PSNR/SSIM JSON under save_dir')
 parser.add_argument('--illum_match_w', type=float, default=0.0,
@@ -163,8 +177,9 @@ parser.add_argument('--mixed_weights_4', type=str, default='2,3,1,1',
 parser.add_argument('--nanobanana_ref_subdir', type=str, default='nanobanana_ref',
                     help='Subdirectory name for nanobanana refs inside data1 camera folders')
 parser.add_argument('--nanobanana_manifest_dir', type=str,
-                    default='/root/data/datasets/data1/.nanobanana_sample_manifest',
-                    help='Directory containing Huawei.txt / Nikon.txt manifest files for the 250-sample subset')
+                    default='/root/data/datasets/data1/.nanobanana_sample_manifest_500',
+                    help='Directory containing Huawei.txt / Nikon.txt (default: 500 Nano refs per camera). '
+                         'Legacy 250-subset: .nanobanana_sample_manifest ; Huawei-271: .nanobanana_sample_manifest_full')
 parser.add_argument('--data1_nanobanana_eval_ref_dir', type=str, default='',
                     help='Optional external clean nanobanana ref directory for data1 eval')
 parser.add_argument('--data1_nanobanana_eval_huawei_ref_dir', type=str,

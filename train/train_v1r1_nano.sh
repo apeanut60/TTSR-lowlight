@@ -49,7 +49,7 @@ python main.py \
     --dataset_dir /root/data/datasets/data1 \
     --data1_camera "$CAM" \
     --nanobanana_ref_subdir nanobanana_ref \
-    --nanobanana_manifest_dir /root/data/datasets/data1/.nanobanana_sample_manifest \
+    --nanobanana_manifest_dir /root/data/datasets/data1/.nanobanana_sample_manifest_500 \
     --save_dir "$SAVE_DIR" \
     --reset True \
     --log_file_name "train_v1r2_nano_${CAM}.log" \
