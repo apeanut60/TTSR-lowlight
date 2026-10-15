@@ -363,10 +363,29 @@ class MainNetEnhance(nn.Module):
             return torch.roll(G, shifts=(dy, dx), dims=(2, 3))
         raise ValueError('Unknown gate_mode %r' % (gate_mode,))
 
+    @staticmethod
+    def _resolve_stage_mode(mode, disable_flag):
+        """Map stage mode / legacy disable_T flag → normal|texture_zero|branch_bypass.
+
+        Explicit ``stage_mode_*`` always wins. Legacy ``disable_T_lv*`` only
+        applies when mode is left unset (None/'').
+        """
+        valid = ('normal', 'texture_zero', 'branch_bypass')
+        if mode is not None and str(mode).strip() != '':
+            mode = str(mode).lower().strip()
+            if mode not in valid:
+                raise ValueError(
+                    'stage mode must be one of %s, got %r' % (valid, mode))
+            return mode
+        return 'texture_zero' if disable_flag else 'normal'
+
     def forward(self, x, S=None, T_lv3=None, T_lv2=None, T_lv1=None,
                 apply_illum=True, ref=None, apply_ref_illum=True,
                 gate_mode=None, gate_shift=None, gate_smooth_kernel=31,
-                collect_gate_stats=False):
+                collect_gate_stats=False,
+                disable_T_lv3=False, disable_T_lv2=False, disable_T_lv1=False,
+                stage_mode_lv3=None, stage_mode_lv2=None, stage_mode_lv1=None,
+                collect_residual_decomp=False):
         """
         Soft-attention order at each injection stage (confirmed):
           1) concat(stream, T_*_up)
@@ -375,18 +394,28 @@ class MainNetEnhance(nn.Module):
           4) stream += gated residual
           5) subsequent RBs / CSFI / merge / illum heads
 
-        ``gate_mode`` / ``gate_shift`` are eval-only; default None is bit-
-        compatible with the original gate path when collect_gate_stats=False.
+        Eval-only stage modes (v1r12):
+          - normal: original T
+          - texture_zero: T→0 before concat; still run conv_head + G + add
+            (≡ v1r11 disable_T_lv*)
+          - branch_bypass: skip conv_head residual entirely (stream unchanged)
+
+        Default all-normal / all-disable False = production path.
         """
         low_input = x
         # Shallow feature extraction
         x = self.SFE(x)  # [N, n_feats, H, W]
         H, W = x.size()[-2:]
 
+        mode_lv3 = self._resolve_stage_mode(stage_mode_lv3, disable_T_lv3)
+        mode_lv2 = self._resolve_stage_mode(stage_mode_lv2, disable_T_lv2)
+        mode_lv1 = self._resolve_stage_mode(stage_mode_lv1, disable_T_lv1)
+
         # Upsample T tensors and S to match MainNet feature spatial size
         # VGG LTE gives: lv1 at H×W, lv2 at H/2×W/2, lv3 at H/4×W/4
         # SearchTransfer returns T at native VGG scales:
-        #   T_lv3 @ H/4×W/4, T_lv2 @ H/2×W/2, T_lv1 @ H×W, S @ H/4×W/4
+        #   T_lv3 @ H/4×W/4 (256ch), T_lv2 @ H/2×W/2 (128ch),
+        #   T_lv1 @ H×W (64ch), S @ H/4×W/4
         T_lv3_up = F.interpolate(T_lv3, size=(H, W), mode='bicubic')
         T_lv2_up = F.interpolate(T_lv2, size=(H, W), mode='bicubic')
         T_lv1_up = F.interpolate(T_lv1, size=(H, W), mode='bicubic')
@@ -396,16 +425,70 @@ class MainNetEnhance(nn.Module):
             smooth_kernel=gate_smooth_kernel)
 
         stage_stats = [] if collect_gate_stats else None
+        decomp_stats = [] if collect_residual_decomp else None
 
-        def _inject(stream, T_up, head_conv, tag):
-            res_pre = head_conv(torch.cat((stream, T_up), dim=1))
+        def _inject(stream, T_up, head_conv, tag, mode):
+            if mode == 'branch_bypass':
+                if stage_stats is not None:
+                    stage_stats.append({
+                        'stage': tag, 'mode': mode,
+                        'res_norm_pre_mean': 0.0,
+                        'res_norm_post_mean': 0.0,
+                        'rel_inject': 0.0,
+                        'res_post_spatial_cv': 0.0,
+                        'res_post_map': torch.zeros(
+                            stream.shape[-2:], device='cpu'),
+                        'bypassed': True,
+                    })
+                if decomp_stats is not None:
+                    decomp_stats.append({
+                        'stage': tag, 'mode': mode, 'bypassed': True,
+                    })
+                return stream
+
+            T_in = torch.zeros_like(T_up) if mode == 'texture_zero' else T_up
+            res_pre = head_conv(torch.cat((stream, T_in), dim=1))
             res_post = res_pre * S_up
+
+            if decomp_stats is not None and mode == 'normal':
+                # Local decomposition on the same incoming F (stream).
+                with torch.no_grad():
+                    r_n = head_conv(torch.cat((stream, T_up), dim=1)).detach()
+                    r_z = head_conv(torch.cat(
+                        (stream, torch.zeros_like(T_up)), dim=1)).detach()
+                    r_t = r_n - r_z
+                    g = S_up.detach()
+                    def _rms(t):
+                        return float(t.float().pow(2).mean().sqrt().item())
+                    def _mae(t):
+                        return float(t.float().abs().mean().item())
+                    def _l2(t):
+                        return float(t.float().norm().item())
+                    rn, rz, rt = _l2(r_n), _l2(r_z), _l2(r_t)
+                    cos = float(F.cosine_similarity(
+                        r_n.flatten(), r_z.flatten(), dim=0).item())
+                    decomp_stats.append({
+                        'stage': tag, 'mode': mode,
+                        'R_normal_mae': _mae(r_n), 'R_normal_rms': _rms(r_n),
+                        'R_zero_mae': _mae(r_z), 'R_zero_rms': _rms(r_z),
+                        'R_texture_mae': _mae(r_t), 'R_texture_rms': _rms(r_t),
+                        'R_zero_over_normal_l2': rz / max(rn, 1e-8),
+                        'R_texture_over_normal_l2': rt / max(rn, 1e-8),
+                        'cos_R_normal_R_zero': cos,
+                        'recon_rel_err': float(
+                            (r_n - r_z - r_t).float().norm() /
+                            max(rn, 1e-8)),
+                        'R_gated_normal_map': (g * r_n)[0].norm(dim=0).cpu(),
+                        'R_gated_zero_map': (g * r_z)[0].norm(dim=0).cpu(),
+                        'R_gated_texture_map': (g * r_t)[0].norm(dim=0).cpu(),
+                    })
+
             if stage_stats is not None:
                 with torch.no_grad():
                     n_pre = res_pre.detach().float().norm(dim=1)
                     n_post = res_post.detach().float().norm(dim=1)
                     stage_stats.append({
-                        'stage': tag,
+                        'stage': tag, 'mode': mode,
                         'res_norm_pre_mean': float(n_pre.mean().item()),
                         'res_norm_post_mean': float(n_post.mean().item()),
                         'rel_inject': float(
@@ -414,13 +497,15 @@ class MainNetEnhance(nn.Module):
                         'res_post_spatial_cv': float(
                             (n_post.std(unbiased=False) /
                              n_post.mean().clamp(min=1e-8)).item()),
-                        'res_post_map': n_post[0].cpu(),  # [H,W] for viz
+                        'res_post_map': n_post[0].cpu(),
+                        'bypassed': False,
+                        't_was_zero': mode == 'texture_zero',
                     })
             return stream + res_post
 
         # ── Stage1 ──
         x11 = x
-        x11 = _inject(x11, T_lv3_up, self.conv11_head, 'stage1_Tlv3')
+        x11 = _inject(x11, T_lv3_up, self.conv11_head, 'stage1_Tlv3', mode_lv3)
 
         x11_res = x11
         for i in range(self.num_res_blocks[1]):
@@ -434,7 +519,7 @@ class MainNetEnhance(nn.Module):
         x22 = x
 
         # Soft-attention: inject T_lv2
-        x22 = _inject(x22, T_lv2_up, self.conv22_head, 'stage2_Tlv2')
+        x22 = _inject(x22, T_lv2_up, self.conv22_head, 'stage2_Tlv2', mode_lv2)
 
         x22_res = x22
 
@@ -458,7 +543,7 @@ class MainNetEnhance(nn.Module):
         x33 = x
 
         # Soft-attention: inject T_lv1
-        x33 = _inject(x33, T_lv1_up, self.conv33_head, 'stage3_Tlv1')
+        x33 = _inject(x33, T_lv1_up, self.conv33_head, 'stage3_Tlv1', mode_lv1)
 
         x33_res = x33
 
@@ -491,7 +576,11 @@ class MainNetEnhance(nn.Module):
         # Diagnostics (not part of checkpoint / not used in training)
         self.last_gate = S_up.detach()
         self.last_gate_pre_transform = G0.detach()
+        self.last_stage_modes = {
+            'lv3': mode_lv3, 'lv2': mode_lv2, 'lv1': mode_lv1,
+        }
         self.last_gate_stats = None
+        self.last_residual_decomp = None
         if collect_gate_stats:
             with torch.no_grad():
                 g = S_up.detach().float()
@@ -514,4 +603,15 @@ class MainNetEnhance(nn.Module):
                         s['stage']: s['res_post_map'] for s in stage_stats
                     },
                 }
+        if collect_residual_decomp:
+            self.last_residual_decomp = [
+                {k: v for k, v in d.items()
+                 if not k.endswith('_map')}
+                for d in decomp_stats
+            ]
+            self.last_residual_decomp_maps = {
+                d['stage']: {
+                    k: d[k] for k in d if k.endswith('_map')
+                } for d in decomp_stats if not d.get('bypassed')
+            }
         return x

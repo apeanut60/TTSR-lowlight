@@ -85,7 +85,10 @@ class TTSREnhance(nn.Module):
                 return_diag=False, query_gamma_override=None,
                 query_hist_lut_override=None,
                 gate_mode=None, gate_shift=None, gate_smooth_kernel=None,
-                collect_gate_stats=False):
+                collect_gate_stats=False,
+                disable_T_lv3=None, disable_T_lv2=None, disable_T_lv1=None,
+                stage_mode_lv3=None, stage_mode_lv2=None, stage_mode_lv1=None,
+                collect_residual_decomp=False):
         if (type(sr) != type(None)):
             # Used in transferal perceptual loss
             self.LTE_copy.load_state_dict(self.LTE.state_dict())
@@ -253,6 +256,26 @@ class TTSREnhance(nn.Module):
             collect_gate_stats = bool(
                 getattr(self.args, 'collect_gate_stats', False))
 
+        def _flag(val, name):
+            if val is not None:
+                return bool(val)
+            return bool(getattr(self.args, name, False))
+
+        def _mode(val, name):
+            if val is not None:
+                return val
+            return getattr(self.args, name, None)
+
+        disable_T_lv3 = _flag(disable_T_lv3, 'disable_T_lv3')
+        disable_T_lv2 = _flag(disable_T_lv2, 'disable_T_lv2')
+        disable_T_lv1 = _flag(disable_T_lv1, 'disable_T_lv1')
+        stage_mode_lv3 = _mode(stage_mode_lv3, 'stage_mode_lv3')
+        stage_mode_lv2 = _mode(stage_mode_lv2, 'stage_mode_lv2')
+        stage_mode_lv1 = _mode(stage_mode_lv1, 'stage_mode_lv1')
+        if not collect_residual_decomp:
+            collect_residual_decomp = bool(
+                getattr(self.args, 'collect_residual_decomp', False))
+
         # MainNetEnhance at 1:1 resolution (original Low, not low_query)
         sr = self.MainNet(
             lr, S, T_lv3, T_lv2, T_lv1,
@@ -260,7 +283,14 @@ class TTSREnhance(nn.Module):
             apply_ref_illum=apply_ref_illum,
             gate_mode=gate_mode, gate_shift=gate_shift,
             gate_smooth_kernel=gate_smooth_kernel,
-            collect_gate_stats=collect_gate_stats)
+            collect_gate_stats=collect_gate_stats,
+            disable_T_lv3=disable_T_lv3,
+            disable_T_lv2=disable_T_lv2,
+            disable_T_lv1=disable_T_lv1,
+            stage_mode_lv3=stage_mode_lv3,
+            stage_mode_lv2=stage_mode_lv2,
+            stage_mode_lv1=stage_mode_lv1,
+            collect_residual_decomp=collect_residual_decomp)
 
         if return_ref:
             out = (sr, S, T_lv3, T_lv2, T_lv1, ref_input)
