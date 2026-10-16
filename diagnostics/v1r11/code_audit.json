@@ -1,0 +1,39 @@
+{
+  "stages": [
+    {
+      "name": "lv3 / stage1",
+      "stream": "x11 from SFE",
+      "feature_shape": "[N, n_feats, H, W] (H,W = Low spatial)",
+      "texture_native": "T_lv3 [N, C_vgg, H/4, W/4]",
+      "texture_up": "bicubic \u2192 [N, C_vgg, H, W]",
+      "residual_head": "conv11_head: concat(x11, T_lv3_up) \u2192 n_feats",
+      "gate": "same G = sigmoid(upsample(S)) multiply residual",
+      "add": "x11 = x11 + gated_residual"
+    },
+    {
+      "name": "lv2 / stage2",
+      "stream": "x22 from SFE (parallel)",
+      "texture_native": "T_lv2 [N, C_vgg, H/2, W/2]",
+      "residual_head": "conv22_head",
+      "gate": "same G",
+      "add": "x22 = x22 + gated_residual"
+    },
+    {
+      "name": "lv1 / stage3",
+      "stream": "x33 from SFE (parallel)",
+      "texture_native": "T_lv1 [N, C_vgg, H, W]",
+      "residual_head": "conv33_head",
+      "gate": "same G",
+      "add": "x33 = x33 + gated_residual"
+    }
+  ],
+  "intervention": "zero T_*_up before concat/residual (disable_T_lv*)",
+  "frozen_m1": {
+    "alpha": 0.75,
+    "beta": 0.5,
+    "lambda": 0.25,
+    "s": "A0",
+    "ckpt": "v1r3e4"
+  },
+  "note_S7_S9": "Under binary stage enable, S7\u2261S3, S8\u2261S2, S9\u2261S1; S4/S5/S6 are single-stage-only runs."
+}

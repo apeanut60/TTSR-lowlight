@@ -1,44 +1,51 @@
-# TTSR-lowlight v2.2 — Results
+# TTSR-lowlight v2.2 — Full-Image DC-Aware Results
 
-**Verdict: Case C (with a tiny mean bump on V1).**  
-Full-image DC-aware fine-tuning did **not** fix harmful global RGB corrections. V1 Full edges V0 by **+0.013 dB** mean PSNR but **worsens** 2053-class tails. V2 (λ_DC=2) regresses the mean. Keep **H3@2000** and **Centered** as research baselines; do not promote V1/V2 as robustness upgrades.
+**Verdict: Case A (mean) partial / Case C (robustness).**  
+V1 Full-Image MSE fine-tune reaches **20.479 dB** (+0.013 over V0 H3@2000), Correct-Nano dependence retained, but **worst-sample tail does not improve** (2053 slightly worse). λDC=2 (V2) does not help the mean. **Centered inference remains the better fix for 2053-class failures.** Do not claim a robustness win; do not start GateNet.
 
-Eval30 is a **reused development set** — not independent generalization.
+Branch: `experiment/ttsr-lowlight-v22` @ `c10f97c` (working tree may include uncommitted v2/v22 files)  
+Experiment: `/root/data/experiments/TTSR-lowlight-v22/`  
+Eval30 is a **reused development set**.
 
 ---
 
-## Identity
+## 1. Setup
 
 | Item | Value |
 |---|---|
-| Branch | `experiment/ttsr-lowlight-v22` |
-| H3 init | `…/H3_v3b0_s42/checkpoint_02000.pt` sha `742d366b…` |
-| V1 final | `…/V1_full_mse_s42/checkpoint_01000.pt` sha `c9a5d511…` |
-| V2 final | `…/V2_full_dc2_s42/checkpoint_01000.pt` sha `0e7a4ab3…` |
-| Train | Huawei500 full-image, batch=1, Adam lr=1e-5, 1000 steps, seed=42 |
-| Peak VRAM | **586 MB** (true full-image; no crop fake) |
-| Frozen | P2, Encoder, LocalSoftMatch |
+| P2 | frozen `model_00004.pt` + M1 + lv2 bypass |
+| H3 init | `H3_v3b0_s42/checkpoint_02000.pt` |
+| Trainable | **V3B0ResidualFusion only** |
+| Data | Huawei Train500 / Eval30 only |
+| Steps | 1000, Adam lr=1e-5, seed=42, **batch=1 full image** |
+| Peak VRAM | ~586 MB |
+| V1 wall time | ~3.8 min |
+| V2 wall time | ~3.9 min |
 
-Phase A: `docs/TTSR_LOWLIGHT_V22_PHASE_A.md`  
-Tests: `tests/test_v22_dc_loss.py`, `tests/test_v22_fullimage_equivalence.py` (PASS; λ_DC=1 ≡ MSE + matching grads).
+Loss: \(L=L_{\mathrm{spatial}}+\lambda_{\mathrm{DC}}L_{\mathrm{DC}}\).  
+Unit tests: λDC=1 ≡ full MSE (value + grad); dense/chunk match eq; Eval∩Train=∅.
+
+Phase A: `docs/TTSR_LOWLIGHT_V22_PHASE_A.md` — Train500 shares ~40% harmful DC; crop≠full mostly at borders; Full-Image training justified.
 
 ---
 
-## Main Eval30 table (final checkpoints)
+## 2. Main Eval30 table
+
+Selected checkpoints: V0=@2000, **V1=@1000 (best)**, V2=@250 (least-bad among V2>0).
 
 | Run | PSNR | SSIM | Δ vs H3(V0) | Worst Δ vs P2 | `<−1dB` |
 |---|---|---|---|---|---|
 | P2 | 20.265 | 0.6340 | — | — | — |
 | V0 Full H3 | **20.466** | 0.6331 | — | −2.860 (2053) | 6 |
-| V0 Centered | 20.419 | — | −0.047 | — | — |
-| **V1 Full** (λ=1) | **20.479** | 0.6334 | **+0.013** | **−2.986** (2053) | 6 |
-| V1 Centered | 20.432 | — | — | — | — |
-| V2 Full (λ=2) | 20.441 | 0.6327 | −0.025 | −2.802 (2053) | 6 |
-| V2 Centered | 20.387 | — | — | — | — |
+| V0 Centered | 20.419 | — | −0.047 | (2053 +0.08) | — |
+| **V1 Full** | **20.479** | 0.6334 | **+0.013** | **−2.986 (2053)** | 6 |
+| V1 Centered | 20.432 | — | −0.034 vs V0 Full | — | — |
+| V2 Full @250 | 20.462 | 0.6330 | −0.004 | −2.821 (2053) | 6 |
+| V2 Centered @250 | 20.414 | — | — | — | — |
 
-### Training curves (Eval30 Full PSNR)
+### Training curves (Full PSNR)
 
-| Step | V1 | V2 |
+| Step | V1 (λ=1) | V2 (λ=2) |
 |---|---|---|
 | 0 | 20.466 | 20.466 |
 | 250 | 20.474 | 20.462 |
@@ -46,86 +53,79 @@ Tests: `tests/test_v22_dc_loss.py`, `tests/test_v22_fullimage_equivalence.py` (P
 | 750 | 20.466 | 20.429 |
 | 1000 | **20.479** | 20.441 |
 
+V2 drifts down — heavier DC weight shrinks helpful corrective means as well as harmful ones.
+
 ---
 
-## Tail / focus samples (Full PSNR)
+## 3. Failure / gain samples
 
-| ID | P2 | V0 | V1 | V2 | V0 Centered |
+| Sample | P2 | V0 Full | V1 Full | V2 Full | ΔV1−V0 |
 |---|---|---|---|---|---|
-| **2053** | 24.379 | 21.520 | **21.394** ↓ | 21.577 | **24.459** |
-| 2059 | 24.383 | 22.848 | 22.713 ↓ | 22.917 | 24.431 |
-| 2055 | 21.273 | 19.835 | 19.776 ↓ | 19.867 | 21.335 |
-| 2058 | 22.012 | 20.755 | 20.681 ↓ | 20.787 | 21.906 |
-| 2042 | 23.616 | 22.456 | 22.376 ↓ | 22.454 | 23.545 |
-| 2052 (gain) | 17.744 | 19.487 | **19.557** ↑ | 19.421 | 17.788 |
-| 2057 | 19.510 | 21.193 | 21.222 ↑ | 21.119 | 19.542 |
-| 2044 | 17.240 | 18.751 | 18.859 ↑ | 18.782 | 17.410 |
+| **2053** | 24.38 | 21.52 | 21.39 | 21.56 | **−0.13** |
+| 2059 | 24.38 | 22.85 | 22.71 | 22.86 | −0.13 |
+| 2055 | 21.27 | 19.84 | 19.78 | 19.84 | −0.06 |
+| 2058 | 22.01 | 20.75 | 20.68 | 20.78 | −0.07 |
+| 2042 | 23.62 | 22.46 | 22.38 | 22.48 | −0.08 |
+| 2052 | 17.74 | 19.49 | **19.56** | 19.46 | +0.07 |
+| 2057 | 19.51 | 21.19 | **21.22** | 21.17 | +0.03 |
+| 2044 | 17.24 | 18.75 | **18.86** | 18.74 | +0.11 |
 
-2053 `D_mean` RGB: V0 (+0.061,+0.066,+0.052) → V1 (**larger** bias) → V2 (similar to V0).  
-Full-image MSE fine-tune did **not** shrink the harmful DC on the worst failure; λ_DC=2 only mildly trimmed 2053’s drop while hurting the mean.
+Interpretation: V1 slightly **amplifies** both helpful and harmful global shifts → mean ↑, tail not healed.  
+**Centered** still repairs 2053 (~24.46) under all arms.
 
-Viz: `/root/data/experiments/TTSR-lowlight-v22/visualizations/2053/`
+Visuals: `/root/data/experiments/TTSR-lowlight-v22/visualizations/*_compare.png`
 
 ---
 
-## Reference-path ablation (second path only)
+## 4. Reference-path ablation (second path only)
 
-| Condition | V0 | V1 | V2 |
+| Condition | V0 | V1@1000 | V2@250 |
 |---|---|---|---|
-| Correct Nano | **20.466** | **20.479** | 20.441 |
-| Self | 20.253 | 20.245 | 20.246 |
-| Mismatch | 19.571 | 19.673 | 19.710 |
-| Zero-T | 18.636 | 18.979 | 19.066 |
+| Correct Nano (Full) | 20.466 | **20.479** | 20.462 |
+| Self | 20.253 | 20.245 | 20.257 |
+| Mismatch | 19.571 | 19.673 | 19.672 |
+| Zero-T | 18.636 | 18.979 | 18.900 |
 
-Correct Nano remains best. Fine-tuning slightly **closes** the gap to Zero-T/Mismatch (less exclusive Nano advantage) — **not** evidence of stronger reference use.
-
----
-
-## Phase A recap
-
-- Train500 also ~40% harmful DC (same mechanism as Eval30).
-- Crop↔Full prediction cosine ≈0.99; border-sensitive; crop loss cannot supervise full-image `m*`.
-- True full-image training is feasible (586 MB).
+Correct Nano remains best. Full-image FT does **not** destroy Nano dependence; Zero-T gap narrows slightly on V1 but Correct still >> Zero-T.
 
 ---
 
-## Answers to the scientific question
+## 5. Checkpoints (SHA256)
 
-> Adjust training scale + RGB DC supervision without new networks?
+| Run | Path | sha256 |
+|---|---|---|
+| V0 | `…/v2/…/H3_v3b0_s42/checkpoint_02000.pt` | `742d366b…ee22` |
+| V1 best | `…/v22/…/V1_full_mse_s42/checkpoint_01000.pt` | `c9a5d511…0412` |
+| V2 @250 | `…/v22/…/V2_full_dc2_s42/checkpoint_00250.pt` | `c1e64518…bc2a` |
 
-**Partial / negative on the failure mode.** V1 gives a **small mean PSNR gain (+0.013)** with Nano still preferred, but **does not reduce severe global-bias failures** (2053 worse). V2’s stronger DC weight **hurts** mean PSNR. Post-hoc **Centered** still heals 2053-class samples far better than any full-output fine-tune here.
-
----
-
-## Go / No-Go
-
-| Case | Fit? |
-|---|---|
-| A — clear gain + better tails | **No** (mean↑ tiny; tails worse on V1) |
-| B — flat mean, better tails | **No** (V2 tails only marginally better; mean↓) |
-| **C — Centered still more robust; full fine-tune unhelpful for the bug** | **Yes** |
-| D — overall collapse | No |
-
-**Retain:** P2 default; H3@2000 research candidate; Centered as robustness diagnostic / optional inference variant (not newly trained).  
-**Do not** start GateNet / Verifier / λ sweeps from this result.
-
----
-
-## Reproduce
+Reproduce:
 
 ```bash
 conda activate ttsr
 cd /root/projects/TTSR-lowlight-v1-data1SOTA
-git checkout experiment/ttsr-lowlight-v22
-
 python tests/test_v22_dc_loss.py
 python tests/test_v22_fullimage_equivalence.py
 python scripts/diag_v22_fullimage_dc.py          # Phase A
 python scripts/train_v22_fullimage.py --arm V1
 python scripts/train_v22_fullimage.py --arm V2
-python scripts/eval_v22_formal.py
+python scripts/eval_v22_formal.py --v1_step 1000 --v2_step 250
 ```
 
-P2 caches symlinked from v2; checkpoints under `/root/data/experiments/TTSR-lowlight-v22/` (not in git).
+---
 
-*v2.2 complete. No automatic next experiment.*
+## 6. Answers to the scientific question
+
+> Can Full-Image + DC-aware loss keep Nano gains while cutting bad global shifts?
+
+| Goal | Result |
+|---|---|
+| Beat 20.466 mean | **Yes, barely** (V1 20.479) |
+| Ease 2053 / `<−1dB` tail | **No** (still 6; 2053 worse on V1) |
+| Keep Correct Nano > Self/Mismatch/Zero-T | **Yes** |
+| λDC=2 better than λ=1 | **No** |
+
+**Recommendation:** Keep **V0 H3@2000** as primary research baseline; treat **V1@1000** as a marginal mean bump only. For 2053-class failures prefer **Centered post-hoc** (or a future mean-clamped inference), not λDC reweighting alone. **No GateNet / Verifier / Nikon** this round.
+
+---
+
+*v2.2 complete. No automatic next version.*

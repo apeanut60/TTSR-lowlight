@@ -1,0 +1,11 @@
+{
+  "priority1_independent_huawei_eval_folder": false,
+  "priority1_notes": "No unused Huawei Eval split exists beyond Eval30. Only leftover Training Nano triplets outside man271 (n=216).",
+  "huawei_train_holdout_count": 216,
+  "huawei_train_holdout_used_for_eval": false,
+  "huawei_train_holdout_exclusion": "Excluded: Training-tree leftovers are not a declared Eval holdout (do not silently use train data as independent test).",
+  "priority2_nikon_eval_count": 20,
+  "eval_executed_on": "Nikon Eval20 CROSS-DOMAIN only (Outcome D)",
+  "block_same_domain_clean_holdout": true,
+  "exact_sha_collisions_holdout_vs_man271": 0
+}

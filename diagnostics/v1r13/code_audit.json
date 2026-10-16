@@ -1,0 +1,9 @@
+{
+  "reused_interface": "stage_mode_lv3/lv2/lv1 from v1r12",
+  "P0": "all normal = M1 / C0",
+  "P1": "lv3 texture_zero = C1; F3+=G*R(F3,0)",
+  "P2": "lv2 branch_bypass = C4; skip conv22_head only",
+  "P3": "lv3 texture_zero + lv2 bypass; lv1 normal",
+  "dependency": "stage2 receives features after modified stage1 (live forward)",
+  "gate": "original A0 S only"
+}

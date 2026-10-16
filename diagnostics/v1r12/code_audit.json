@@ -1,0 +1,38 @@
+{
+  "mapping": [
+    {
+      "T": "T_lv3",
+      "stage": 1,
+      "head": "conv11_head",
+      "T_ch": 256,
+      "stream": "x11\u2190SFE",
+      "add": "x11+=G*R"
+    },
+    {
+      "T": "T_lv2",
+      "stage": 2,
+      "head": "conv22_head",
+      "T_ch": 128,
+      "stream": "x22\u2190SFE",
+      "add": "x22+=G*R"
+    },
+    {
+      "T": "T_lv1",
+      "stage": 3,
+      "head": "conv33_head",
+      "T_ch": 64,
+      "stream": "x33\u2190SFE",
+      "add": "x33+=G*R"
+    }
+  ],
+  "residual": "R(F,T)=conv_head(concat(F,T)); gated=R*G; F\u2190F+gated",
+  "texture_zero": "F_zero = F + G*R(F,0)",
+  "branch_bypass": "F_bypass = F  (no conv_head call)",
+  "note": "R(F,0) \u2260 0 due to stream channels + bias in conv_head",
+  "gate": "original A0 sigmoid(upsample(S)); no v1r10 G2",
+  "frozen_m1": {
+    "alpha": 0.75,
+    "beta": 0.5,
+    "lambda": 0.25
+  }
+}

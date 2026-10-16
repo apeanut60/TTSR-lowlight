@@ -1,0 +1,10 @@
+{
+  "command": "python tests/test_v1r12_texture_bypass.py",
+  "result": "ALL PASS",
+  "eval_regression": {
+    "C0": "20.1805 / 0.6327 matches v1r9 M1 / v1r11 S0",
+    "C1": "20.234 matches v1r11 S1 (lv3 texture_zero)",
+    "C3": "20.212 matches v1r11 S2",
+    "C5": "20.145 matches v1r11 S3"
+  }
+}
