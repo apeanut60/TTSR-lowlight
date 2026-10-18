@@ -79,6 +79,4 @@ constant image, border weight > 0, irregular H/W, one call each and fixed order,
 
 ## Commit
 
-Implementation commit SHA is filled in the commit that adds this file's final hash line below.
-
-`FIX_COMMIT_SHA`
+Implementation commit: `4fda89dc90f667e9550b53b05f27ec31dd24363a`.
