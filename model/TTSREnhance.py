@@ -80,6 +80,18 @@ class TTSREnhance(nn.Module):
         """Delegate to MainNet's reference illumination transfer (post-stitch)."""
         return self.MainNet.apply_ref_illum(x, low, ref)
 
+    def get_effective_reference(self, ref):
+        """Reference seen by RefIllumTransfer.
+
+        Matches ``forward``: RefCorrection once when enabled, otherwise the
+        raw reference. Never uses GT. ``None`` stays ``None``.
+        """
+        if ref is None:
+            return None
+        if self.RefCorrection is None:
+            return ref.detach()
+        return self.RefCorrection(ref)
+
     def forward(self, lr=None, lrsr=None, ref=None, refsr=None, sr=None,
                 return_ref=False, apply_illum=True, apply_ref_illum=True,
                 return_diag=False, query_gamma_override=None,

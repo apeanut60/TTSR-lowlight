@@ -34,6 +34,11 @@ def to_uint8(t):
     return a.astype(np.uint8)
 
 
+def score_rgb_tensors(pred, gt):
+    """LOLv2 / Nikon RGB score. uint8, no GT mean-align, no TTA."""
+    return channel_metrics(to_uint8(pred), to_uint8(gt))
+
+
 def channel_metrics(pred_u8, gt_u8):
     psnr_rgb = float(calc_psnr_rgb(pred_u8, gt_u8))
     psnr_y = float(calc_psnr(pred_u8, gt_u8))

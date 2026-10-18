@@ -89,61 +89,147 @@ def apply_p2_cfg(model):
     model.args.disable_T_lv1 = False
 
 
+def tile_spans(length, tile, overlap):
+    """Inclusive-exclusive spans along one axis. No negative origins.
+
+    Images shorter than ``tile`` are a single span of the true length.
+    The last span is shifted so it stays inside the image when the length
+    is not a multiple of the stride.
+    """
+    length = int(length)
+    tile = int(tile)
+    if length <= 0 or tile <= 0:
+        raise ValueError('length and tile must be positive')
+    if length <= tile:
+        return [(0, length)]
+    overlap = max(0, min(int(overlap), tile - 1))
+    stride = tile - overlap
+    spans = []
+    start = 0
+    while True:
+        if start + tile >= length:
+            last = (length - tile, length)
+            if not spans or spans[-1] != last:
+                spans.append(last)
+            break
+        spans.append((start, start + tile))
+        start += stride
+    return spans
+
+
+def cosine_ramp(overlap, device, dtype):
+    overlap = int(overlap)
+    if overlap <= 0:
+        return torch.ones(0, device=device, dtype=dtype)
+    ang = torch.linspace(0, math.pi, overlap, device=device, dtype=dtype)
+    return 0.5 - 0.5 * torch.cos(ang)
+
+
+def tile_blend_weight(y0, y1, x0, x1, height, width, overlap, device, dtype):
+    """Feather only edges that touch another tile. Outer image borders stay 1."""
+    th = int(y1 - y0)
+    tw = int(x1 - x0)
+    if th <= 0 or tw <= 0:
+        raise ValueError('empty tile')
+    wy = torch.ones(th, device=device, dtype=dtype)
+    wx = torch.ones(tw, device=device, dtype=dtype)
+    ov_h = min(int(overlap), th)
+    ov_w = min(int(overlap), tw)
+    if ov_h > 0:
+        ramp_h = cosine_ramp(ov_h, device, dtype)
+        if y0 > 0:
+            wy[:ov_h] = wy[:ov_h] * ramp_h
+        if y1 < height:
+            wy[-ov_h:] = wy[-ov_h:] * ramp_h.flip(0)
+    if ov_w > 0:
+        ramp_w = cosine_ramp(ov_w, device, dtype)
+        if x0 > 0:
+            wx[:ov_w] = wx[:ov_w] * ramp_w
+        if x1 < width:
+            wx[-ov_w:] = wx[-ov_w:] * ramp_w.flip(0)
+    return wy[:, None] * wx[None, :]
+
+
+def forward_p2_tiled_backbone(model, args, lr, lrsr, ref, refsr, enable_grad=False):
+    """Tiled P2 backbone. No RefIllumTransfer and no GlobalIllumHead.
+
+    Query gamma/LUT are computed once on the full image. Backbone gradients
+    are off unless ``enable_grad`` is set. The returned tensor is float32 in
+    the model's native ``[-1, 1]`` range.
+    """
+    apply_p2_cfg(model)
+    tile = int(args.tile_size)
+    overlap = max(0, min(int(args.tile_overlap), max(tile // 2, 0)))
+    ctx = torch.enable_grad() if enable_grad else torch.no_grad()
+    with ctx:
+        if ref is None:
+            g, lut = None, None
+        else:
+            g, lut, _ = estimate_query_align_maps(
+                lrsr, ref, alpha=args.query_illum_alpha,
+                gamma_min=args.query_gamma_min, gamma_max=args.query_gamma_max,
+                bins=args.query_hist_bins)
+        fwd = dict(
+            query_gamma_override=g, query_hist_lut_override=lut,
+            stage_mode_lv3=args.stage_mode_lv3,
+            stage_mode_lv2=args.stage_mode_lv2,
+            stage_mode_lv1=args.stage_mode_lv1,
+        )
+        _, _, height, width = lr.shape
+
+        def one(y0, y1, x0, x1):
+            return model(
+                lr=lr[:, :, y0:y1, x0:x1],
+                lrsr=lrsr[:, :, y0:y1, x0:x1],
+                ref=None if ref is None else ref[:, :, y0:y1, x0:x1],
+                refsr=None if refsr is None else refsr[:, :, y0:y1, x0:x1],
+                apply_illum=False, apply_ref_illum=False, **fwd)[0]
+
+        spans_y = tile_spans(height, tile, overlap)
+        spans_x = tile_spans(width, tile, overlap)
+        if len(spans_y) == 1 and len(spans_x) == 1:
+            y0, y1 = spans_y[0]
+            x0, x1 = spans_x[0]
+            sr = one(y0, y1, x0, x1)
+        else:
+            acc = torch.zeros(1, 3, height, width, device=lr.device, dtype=lr.dtype)
+            wt = torch.zeros(1, 1, height, width, device=lr.device, dtype=lr.dtype)
+            for y0, y1 in spans_y:
+                for x0, x1 in spans_x:
+                    pred = one(y0, y1, x0, x1)
+                    weight = tile_blend_weight(
+                        y0, y1, x0, x1, height, width, overlap,
+                        lr.device, lr.dtype)
+                    acc[:, :, y0:y1, x0:x1] = acc[:, :, y0:y1, x0:x1] + pred * weight
+                    wt[:, :, y0:y1, x0:x1] = wt[:, :, y0:y1, x0:x1] + weight
+            if int((wt <= 0).sum()) != 0:
+                raise RuntimeError('tiled backbone left pixels with weight <= 0')
+            sr = acc / wt
+        if not torch.isfinite(sr).all():
+            raise RuntimeError('tiled backbone produced a non-finite value')
+    return sr
+
+
+def apply_p2_photometric_postprocess(model, sr, low, ref):
+    """RefIllumTransfer, then GlobalIllumHead. One call each.
+
+    The reference is the full-image effective reference (RefCorrection once
+    when that head exists). Gradients of these two modules are not blocked.
+    """
+    ref_eff = model.get_effective_reference(ref)
+    y = model.apply_ref_illum(sr, low, ref_eff)
+    y = model.apply_illum_head(y, low)
+    if not torch.isfinite(y).all():
+        raise RuntimeError('photometric postprocess produced a non-finite value')
+    return y
+
+
 @torch.no_grad()
 def tiled_p2(model, args, lr, lrsr, ref, refsr):
     """Full-image tiled P2 forward; returns [1,3,H,W] float32 in [-1,1]."""
-    apply_p2_cfg(model)
-    tile = args.tile_size
-    overlap = max(0, min(args.tile_overlap, tile // 2))
-    g, lut, _ = estimate_query_align_maps(
-        lrsr, ref, alpha=args.query_illum_alpha,
-        gamma_min=args.query_gamma_min, gamma_max=args.query_gamma_max,
-        bins=args.query_hist_bins)
-    fwd = dict(
-        query_gamma_override=g, query_hist_lut_override=lut,
-        stage_mode_lv3=args.stage_mode_lv3,
-        stage_mode_lv2=args.stage_mode_lv2,
-        stage_mode_lv1=args.stage_mode_lv1,
-    )
-    _, _, H, W = lr.shape
-
-    def one(y0, y1, x0, x1):
-        return model(
-            lr=lr[:, :, y0:y1, x0:x1],
-            lrsr=lrsr[:, :, y0:y1, x0:x1],
-            ref=ref[:, :, y0:y1, x0:x1],
-            refsr=refsr[:, :, y0:y1, x0:x1],
-            apply_illum=False, apply_ref_illum=False, **fwd)[0]
-
-    if H <= tile and W <= tile:
-        sr = one(0, H, 0, W)
-    else:
-        stride = max(1, tile - overlap)
-        nh = max(1, (H - overlap + stride - 1) // stride)
-        nw = max(1, (W - overlap + stride - 1) // stride)
-        acc = torch.zeros(1, 3, H, W, device=lr.device)
-        wt = torch.zeros(1, 1, H, W, device=lr.device)
-        my = torch.ones(tile, device=lr.device)
-        mx = torch.ones(tile, device=lr.device)
-        if overlap > 0:
-            ramp = 0.5 - 0.5 * torch.cos(
-                torch.linspace(0, math.pi, overlap, device=lr.device))
-            my[:overlap] = ramp
-            my[-overlap:] = ramp.flip(0)
-            mx[:overlap] = ramp
-            mx[-overlap:] = ramp.flip(0)
-        feather = (my[:, None] * mx[None, :]).view(1, 1, tile, tile)
-        for ih in range(nh):
-            y0 = min(ih * stride, H - tile)
-            for iw in range(nw):
-                x0 = min(iw * stride, W - tile)
-                t = one(y0, y0 + tile, x0, x0 + tile)
-                acc[:, :, y0:y0 + tile, x0:x0 + tile] += t * feather
-                wt[:, :, y0:y0 + tile, x0:x0 + tile] += feather
-        sr = acc / wt.clamp(min=1e-8)
-    sr = model.apply_ref_illum(sr, lr, ref)
-    sr = model.apply_illum_head(sr, lr)
-    return sr
+    sr = forward_p2_tiled_backbone(
+        model, args, lr, lrsr, ref, refsr, enable_grad=False)
+    return apply_p2_photometric_postprocess(model, sr, lr, ref)
 
 
 def as_batch(path, device):

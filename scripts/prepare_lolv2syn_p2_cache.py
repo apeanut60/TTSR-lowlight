@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
-import json
 import os
 import sys
 
@@ -16,7 +14,8 @@ sys.path.insert(0, ROOT)
 sys.path.insert(0, os.path.join(ROOT, 'scripts'))
 
 from local_refine_runtime import (  # noqa: E402
-    cache_path, read_manifest_csv, sha256, write_metadata,
+    begin_cache, cache_manifest_sha, cache_path, read_manifest_csv, sha256,
+    write_metadata,
 )
 from train_nikon_domain import load_p2_from  # noqa: E402
 from v2_p2_runtime import P2_CONFIG, infer_p2_pair  # noqa: E402
@@ -27,16 +26,27 @@ L1_P2 = (
     '/root/data/experiments/TTSR-lowlight-lolv2syn/checkpoints/'
     'S1_p2_only_mse_s42/checkpoint_00100.pt')
 PREPROCESS_VERSION = (
-    'lolv2syn:S1-best P2 tiled(256/96)->float32[-1,1]; Huawei v2 H1/H3 recipe'
+    'lolv2syn:border-safe tiled backbone + RefCorrection before RefIllum; '
+    'float32[-1,1]; Huawei v2 H1/H3 recipe'
 )
 
 
-def cache_split(rows, model, args, cache_dir, device, tag, ckpt):
-    os.makedirs(cache_dir, exist_ok=True)
+def cache_split(rows, model, args, cache_dir, device, tag, ckpt, rebuild=False):
+    expect = dict(
+        base_checkpoint_sha256=sha256(ckpt),
+        manifest_sha256=cache_manifest_sha(rows),
+        p2_config=P2_CONFIG,
+        preprocess_version=PREPROCESS_VERSION,
+        dtype='float32',
+        range='[-1,1]',
+        sample_ids=[r['sample_id'] for r in rows],
+    )
+    status = begin_cache(cache_dir, expect, rebuild)
+    if status == 'match':
+        print('[%s] reuse verified cache %s' % (tag, cache_dir), flush=True)
+        return
     for i, row in enumerate(rows):
         out = cache_path(cache_dir, row)
-        if os.path.isfile(out):
-            continue
         y0 = infer_p2_pair(model, args, row['low_path'], row['nano_path'], device)
         if not torch.isfinite(y0).all():
             raise SystemExit('non-finite Y0 for %s' % row['sample_id'])
@@ -47,16 +57,15 @@ def cache_split(rows, model, args, cache_dir, device, tag, ckpt):
     missing = [r['sample_id'] for r in rows if not os.path.isfile(cache_path(cache_dir, r))]
     if missing:
         raise SystemExit('cache incomplete: %s' % missing[:5])
-    man_bytes = json.dumps([r['sample_id'] for r in rows], sort_keys=True).encode()
     write_metadata(cache_dir, dict(
         complete=True, tag=tag, n=len(rows),
         base_checkpoint=ckpt,
-        base_checkpoint_sha256=sha256(ckpt),
+        base_checkpoint_sha256=expect['base_checkpoint_sha256'],
         p2_config=P2_CONFIG,
         preprocess_version=PREPROCESS_VERSION,
         dtype='float32', range='[-1,1]', layout='CHW',
-        manifest_sha256=hashlib.sha256(man_bytes).hexdigest(),
-        sample_ids=[r['sample_id'] for r in rows],
+        manifest_sha256=expect['manifest_sha256'],
+        sample_ids=expect['sample_ids'],
     ))
     print('[%s] complete -> %s' % (tag, cache_dir), flush=True)
 
@@ -66,6 +75,8 @@ def main():
     ap.add_argument('--exp_root', default=EXP)
     ap.add_argument('--p2_ckpt', default=L1_P2)
     ap.add_argument('--man_src', default='/root/data/experiments/TTSR-lowlight-lolv2syn/manifests_h3')
+    ap.add_argument('--rebuild_cache', action='store_true',
+                    help='Delete existing .npy/metadata in the cache dir, then rebuild')
     a = ap.parse_args()
     man = os.path.join(a.exp_root, 'manifests')
     os.makedirs(man, exist_ok=True)
@@ -83,8 +94,8 @@ def main():
     tr = read_manifest_csv(os.path.join(man, 'manifests_train.csv'))
     ev = read_manifest_csv(os.path.join(man, 'manifests_eval.csv'))
     print('caching train=%d eval=%d from %s' % (len(tr), len(ev), a.p2_ckpt), flush=True)
-    cache_split(tr, p2, args, os.path.join(a.exp_root, 'cache_p2_train'), device, 'train', a.p2_ckpt)
-    cache_split(ev, p2, args, os.path.join(a.exp_root, 'cache_p2_eval'), device, 'eval', a.p2_ckpt)
+    cache_split(tr, p2, args, os.path.join(a.exp_root, 'cache_p2_train'), device, 'train', a.p2_ckpt, a.rebuild_cache)
+    cache_split(ev, p2, args, os.path.join(a.exp_root, 'cache_p2_eval'), device, 'eval', a.p2_ckpt, a.rebuild_cache)
 
 
 if __name__ == '__main__':

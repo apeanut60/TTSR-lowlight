@@ -51,6 +51,68 @@ def load_cache(cache_dir, row):
     return np.load(p)
 
 
+def cache_manifest_sha(rows):
+    ids = [r['sample_id'] for r in rows]
+    return hashlib.sha256(json.dumps(ids, sort_keys=True).encode()).hexdigest()
+
+
+def clear_cache_files(cache_dir):
+    """Remove cached arrays and metadata. Does not touch other files."""
+    if not os.path.isdir(cache_dir):
+        return
+    for name in os.listdir(cache_dir):
+        if name.endswith('.npy') or name == 'metadata.json':
+            os.remove(os.path.join(cache_dir, name))
+
+
+def assert_cache_compatible(cache_dir, expect):
+    """Return 'empty' or 'match'. Never rewrite metadata.
+
+    A directory that already has arrays or metadata and does not match
+    ``expect`` raises. Callers must pass ``--rebuild_cache`` to delete it.
+    """
+    os.makedirs(cache_dir, exist_ok=True)
+    npy_ids = sorted(
+        name[:-4] for name in os.listdir(cache_dir) if name.endswith('.npy'))
+    meta_path = os.path.join(cache_dir, 'metadata.json')
+    has_meta = os.path.isfile(meta_path)
+    if not npy_ids and not has_meta:
+        return 'empty'
+    if not has_meta:
+        raise SystemExit(
+            'cache %s has .npy files and no metadata.json; '
+            'pass --rebuild_cache or use a new directory' % cache_dir)
+    meta = json.load(open(meta_path, encoding='utf-8'))
+    if not meta.get('complete'):
+        raise SystemExit(
+            'cache %s is not marked complete; pass --rebuild_cache' % cache_dir)
+    keys = (
+        'base_checkpoint_sha256', 'manifest_sha256', 'p2_config',
+        'preprocess_version', 'dtype', 'range',
+    )
+    bad = [k for k in keys if meta.get(k) != expect.get(k)]
+    expect_ids = list(expect['sample_ids'])
+    if list(meta.get('sample_ids') or []) != expect_ids:
+        bad.append('sample_ids')
+    if npy_ids != sorted(expect_ids):
+        bad.append('npy_set')
+    if bad:
+        raise SystemExit(
+            'cache %s does not match this checkpoint/manifest (%s). '
+            'Refusing to relabel old .npy files. Use a new directory or '
+            '--rebuild_cache.' % (cache_dir, ','.join(bad)))
+    return 'match'
+
+
+def begin_cache(cache_dir, expect, rebuild):
+    """Prepare a cache directory. Metadata is not written here."""
+    os.makedirs(cache_dir, exist_ok=True)
+    if rebuild:
+        clear_cache_files(cache_dir)
+        return 'rebuild'
+    return assert_cache_compatible(cache_dir, expect)
+
+
 def write_metadata(cache_dir, extra):
     os.makedirs(cache_dir, exist_ok=True)
     with open(os.path.join(cache_dir, 'metadata.json'), 'w', encoding='utf-8') as f:

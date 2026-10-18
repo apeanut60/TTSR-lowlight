@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import math
 import os
 import sys
 import time
@@ -30,10 +29,14 @@ sys.path.insert(0, os.path.join(ROOT, 'scripts'))
 from dataset.data1_localrefine import read_rgb_model_tensor  # noqa: E402
 from eval_nikon_export import channel_metrics, to_uint8  # noqa: E402
 from local_refine_runtime import read_manifest_csv, sha256, _read_eval_tensor  # noqa: E402
-from model.query_illum_align import estimate_query_align_maps  # noqa: E402
+from lolv2_split import (  # noqa: E402
+    add_eval_split_args, load_official_test, prepare_fit_val, select_monitor_rows,
+)
 from train_nikon_domain import load_p2_from  # noqa: E402
 from train_v24_end2end import grad_norm, param_delta, snapshot  # noqa: E402
-from v2_p2_runtime import apply_p2_cfg, tiled_p2  # noqa: E402
+from v2_p2_runtime import (  # noqa: E402
+    apply_p2_photometric_postprocess, forward_p2_tiled_backbone, tiled_p2,
+)
 
 EXP = '/root/data/experiments/TTSR-lowlight-lolv2syn'
 S1C = (
@@ -58,69 +61,15 @@ def configure_illum_only(model):
     return trainable
 
 
-@torch.no_grad()
-def tiled_backbone(model, args, lr, lrsr, ref, refsr):
-    """Same as tiled_p2 but without illum heads (pre-tone residual)."""
-    apply_p2_cfg(model)
-    tile = args.tile_size
-    overlap = max(0, min(args.tile_overlap, tile // 2))
-    g, lut, _ = estimate_query_align_maps(
-        lrsr, ref, alpha=args.query_illum_alpha,
-        gamma_min=args.query_gamma_min, gamma_max=args.query_gamma_max,
-        bins=args.query_hist_bins)
-    fwd = dict(
-        query_gamma_override=g, query_hist_lut_override=lut,
-        stage_mode_lv3=args.stage_mode_lv3,
-        stage_mode_lv2=args.stage_mode_lv2,
-        stage_mode_lv1=args.stage_mode_lv1,
-    )
-    _, _, H, W = lr.shape
-
-    def one(y0, y1, x0, x1):
-        return model(
-            lr=lr[:, :, y0:y1, x0:x1],
-            lrsr=lrsr[:, :, y0:y1, x0:x1],
-            ref=ref[:, :, y0:y1, x0:x1],
-            refsr=refsr[:, :, y0:y1, x0:x1],
-            apply_illum=False, apply_ref_illum=False, **fwd)[0]
-
-    if H <= tile and W <= tile:
-        return one(0, H, 0, W)
-    stride = max(1, tile - overlap)
-    nh = max(1, (H - overlap + stride - 1) // stride)
-    nw = max(1, (W - overlap + stride - 1) // stride)
-    acc = torch.zeros(1, 3, H, W, device=lr.device)
-    wt = torch.zeros(1, 1, H, W, device=lr.device)
-    my = torch.ones(tile, device=lr.device)
-    mx = torch.ones(tile, device=lr.device)
-    if overlap > 0:
-        ramp = 0.5 - 0.5 * torch.cos(
-            torch.linspace(0, math.pi, overlap, device=lr.device))
-        my[:overlap] = ramp
-        my[-overlap:] = ramp.flip(0)
-        mx[:overlap] = ramp
-        mx[-overlap:] = ramp.flip(0)
-    feather = (my[:, None] * mx[None, :]).view(1, 1, tile, tile)
-    for ih in range(nh):
-        y0 = min(ih * stride, H - tile)
-        for iw in range(nw):
-            x0 = min(iw * stride, W - tile)
-            t = one(y0, y0 + tile, x0, x0 + tile)
-            acc[:, :, y0:y0 + tile, x0:x0 + tile] += t * feather
-            wt[:, :, y0:y0 + tile, x0:x0 + tile] += feather
-    return acc / wt.clamp(min=1e-8)
-
-
 def illum_forward(model, args, low, nano, live=True):
-    """Backbone no-grad; illum heads live if live=True."""
-    yb = tiled_backbone(model, args, low, low, nano, nano)
+    """Same functions as tiled_p2. Backbone has no grad; photometric heads do when live."""
+    yb = forward_p2_tiled_backbone(
+        model, args, low, low, nano, nano, enable_grad=False)
     if live:
-        y = model.apply_ref_illum(yb, low, nano)
-        y = model.apply_illum_head(y, low)
+        y = apply_p2_photometric_postprocess(model, yb, low, nano)
     else:
         with torch.no_grad():
-            y = model.apply_ref_illum(yb, low, nano)
-            y = model.apply_illum_head(y, low)
+            y = apply_p2_photometric_postprocess(model, yb, low, nano)
     return y, yb
 
 
@@ -181,6 +130,7 @@ def main():
     ap.add_argument('--patience', type=int, default=3)
     ap.add_argument('--workers', type=int, default=2)
     ap.add_argument('--allow_overwrite', action='store_true')
+    add_eval_split_args(ap)
     a = ap.parse_args()
 
     run_name = a.run_name or ('S1d_illum_full_mse_fromS1c400_s%d' % a.seed)
@@ -197,8 +147,23 @@ def main():
         torch.cuda.manual_seed_all(a.seed)
 
     man_dir = os.path.join(a.out_root, 'manifests_h3')
-    tr = read_manifest_csv(os.path.join(man_dir, 'manifests_train.csv'))
-    ev = read_manifest_csv(os.path.join(man_dir, 'manifests_eval.csv'))
+    tr_all = read_manifest_csv(os.path.join(man_dir, 'manifests_train.csv'))
+
+    if a.eval_split == 'test':
+        rows = load_official_test(man_dir, a.eval_split, a.final_eval)
+        p2, p2_args = load_p2_from(a.p2_ckpt, device, joint=False)
+        summary, per = eval_rgb(p2, p2_args, rows, device)
+        print('FINAL Official Test PSNR_RGB=%.4f SSIM_RGB=%.4f n=%d' % (
+            summary['psnr_rgb'], summary['ssim_rgb'], summary['n']), flush=True)
+        return
+
+    fit_rows, val_rows, split_meta = prepare_fit_val(
+        tr_all, man_dir, a.seed, a.val_ratio)
+    ev, ev_name = select_monitor_rows(man_dir, 'val', False, val_rows)
+    print('monitor=%s n=%d fit=%d scene=%s' % (
+        ev_name, len(ev), len(fit_rows), split_meta.get('scene_isolation')),
+          flush=True)
+    tr = fit_rows
 
     p2, p2_args = load_p2_from(a.p2_ckpt, device, joint=False)
     names = configure_illum_only(p2)
@@ -231,7 +196,7 @@ def main():
         nonlocal peak_mem, best, no_improve
         if torch.cuda.is_available():
             peak_mem = max(peak_mem, torch.cuda.max_memory_allocated() / (1 << 20))
-        print('--- eval @', step, flush=True)
+        print('--- eval @ %s (%s)' % (step, ev_name), flush=True)
         summary, per = eval_rgb(p2, p2_args, ev, device)
         print('  PSNR_RGB=%.4f SSIM_RGB=%.4f R/G/B=%.3f/%.3f/%.3f' % (
             summary['psnr_rgb'], summary['ssim_rgb'],
@@ -308,8 +273,10 @@ def main():
         vars(a), run_name=run_name, n_illum_trainable=n_train,
         illum_param_names=names, p2_init_sha256=sha256(a.p2_ckpt),
         peak_mem_mb=peak_mem, elapsed_min=(time.time() - t0) / 60,
-        protocol='lolv2syn-illum-full-image',
-        n_train=len(tr), n_eval=len(ev), best=best, stopped_step=step,
+        protocol='lolv2syn-illum-full-image-val-select',
+        n_train=len(tr), n_eval=len(ev), eval_split=ev_name,
+        scene_isolation=split_meta.get('scene_isolation'),
+        best=best, stopped_step=step,
     )
     with open(os.path.join(run_dir, 'config.json'), 'w') as f:
         json.dump(cfg, f, indent=2, sort_keys=True)

@@ -30,6 +30,10 @@ from local_refine_runtime import read_manifest_csv, sha256, _read_eval_tensor  #
 from loss.loss_enhance import MSSSIMLoss, ReconstructionLoss  # noqa: E402
 from model.LocalRefine import LocalSoftMatch, SharedEncoder  # noqa: E402
 from model.V3BResidualFusion import V3B0ResidualFusion  # noqa: E402
+from lolv2_split import (  # noqa: E402
+    add_eval_split_args, assert_schedule_in_fit, load_official_test,
+    prepare_fit_val, select_monitor_rows,
+)
 from train_nikon_domain import (  # noqa: E402
     ScheduleCropSet, load_h3_from, load_p2_from, load_schedule,
 )
@@ -139,12 +143,15 @@ def build_manifests(out_dir):
     return len(train_rows)
 
 
-def build_schedule(manifest_dir, seed, crop, steps):
-    tr = read_manifest_csv(os.path.join(manifest_dir, 'manifests_train.csv'))
+def build_schedule(manifest_dir, seed, crop, steps, rows=None, out_name=None):
+    tr = rows
+    if tr is None:
+        tr = read_manifest_csv(os.path.join(manifest_dir, 'manifests_train_fit.csv'))
     n = len(tr)
     epochs = int(np.ceil(steps / float(n)))
     rng = np.random.RandomState(seed)
-    out = os.path.join(manifest_dir, 'random_crop_s%d.csv' % seed)
+    out = os.path.join(
+        manifest_dir, out_name or ('random_crop_fit_s%d.csv' % seed))
     rows = []
     step = 0
     for ep in range(epochs):
@@ -300,12 +307,21 @@ def train_arm(a, device, man_dir):
         groups.append(dict(params=list(head.parameters()), lr=head_lr, name='head'))
     opt = torch.optim.Adam(groups, betas=(0.9, 0.999), eps=1e-8, weight_decay=0)
 
-    tr = read_manifest_csv(os.path.join(man_dir, 'manifests_train.csv'))
-    ev = read_manifest_csv(os.path.join(man_dir, 'manifests_eval.csv'))
-    schedule_path = a.schedule or os.path.join(man_dir, 'random_crop_s%d.csv' % a.seed)
+    tr_all = read_manifest_csv(os.path.join(man_dir, 'manifests_train.csv'))
+    fit_rows, val_rows, split_meta = prepare_fit_val(
+        tr_all, man_dir, a.seed, a.val_ratio)
+    ev, ev_name = select_monitor_rows(man_dir, a.eval_split, a.final_eval, val_rows)
+    print('monitor=%s n=%d fit=%d scene=%s' % (
+        ev_name, len(ev), len(fit_rows), split_meta.get('scene_isolation')),
+          flush=True)
+    schedule_path = a.schedule or os.path.join(
+        man_dir, 'random_crop_fit_s%d.csv' % a.seed)
     if not os.path.isfile(schedule_path):
-        schedule_path = build_schedule(man_dir, a.seed, a.crop, a.steps)
+        schedule_path = build_schedule(man_dir, a.seed, a.crop, a.steps, rows=fit_rows)
     sch = load_schedule(schedule_path)[:a.steps]
+    assert_schedule_in_fit(
+        sch, {r['sample_id'] for r in fit_rows}, {r['sample_id'] for r in val_rows})
+    tr = fit_rows
     ds = ScheduleCropSet(sch, {r['sample_id']: r for r in tr})
     dl = DataLoader(ds, batch_size=1, shuffle=False, num_workers=a.workers)
 
@@ -336,7 +352,7 @@ def train_arm(a, device, man_dir):
         summary, per = eval_rgb(
             p2, p2_args, enc, mat, head, ev, device, with_h3=train_h3)
         key = 'psnr_rgb'
-        print('  Y PSNR_RGB=%.4f SSIM_RGB=%.4f | P2-only=%.4f' % (
+        print('  PSNR_RGB=%.4f SSIM_RGB=%.4f | P2-only=%.4f' % (
             summary['psnr_rgb'], summary['ssim_rgb'], summary['p2_psnr_rgb']), flush=True)
         with open(os.path.join(run_dir, 'eval_step_%05d.json' % step), 'w') as f:
             json.dump(dict(step=step, summary=summary, per_image=per), f)
@@ -476,6 +492,7 @@ def main():
     ap.add_argument('--schedule', default='')
     ap.add_argument('--run_name', default='',
                     help='Override checkpoint folder name for P2 arm')
+    add_eval_split_args(ap)
     a = ap.parse_args()
 
     if a.arm == 'A0' and a.h3_init == 'huawei':
@@ -489,13 +506,28 @@ def main():
     else:
         print('reuse manifests in', man_dir, flush=True)
 
+    if a.eval_split == 'test':
+        rows = load_official_test(man_dir, a.eval_split, a.final_eval)
+        if a.arm == 'P0':
+            run_p0(device, man_dir, a.out_root)
+            return
+        if a.arm != 'P0':
+            p2, args = load_p2_from(a.p2_ckpt, device, joint=False)
+            summary, per = eval_rgb(
+                p2, args, None, None, None, rows, device, with_h3=False)
+            print('FINAL Official Test PSNR_RGB=%.4f SSIM_RGB=%.4f n=%d' % (
+                summary['psnr_rgb'], summary['ssim_rgb'], summary['n']), flush=True)
+            out = os.path.join(a.out_root, 'final_eval')
+            os.makedirs(out, exist_ok=True)
+            with open(os.path.join(out, 'official_test.json'), 'w') as f:
+                json.dump(dict(summary=summary, per_image=per, ckpt=a.p2_ckpt,
+                                protocol='uint8-rgb-no-mean-align'), f)
+        return
+
     if a.arm == 'P0':
-        run_p0(device, man_dir, a.out_root)
-    else:
-        if a.arm == 'P2' and not os.path.isfile(
-                os.path.join(man_dir, 'random_crop_s%d.csv' % a.seed)):
-            build_schedule(man_dir, a.seed, a.crop, a.steps)
-        train_arm(a, device, man_dir)
+        raise SystemExit(
+            'P0 reads Official Test. Pass --eval_split test --final_eval.')
+    train_arm(a, device, man_dir)
 
 
 if __name__ == '__main__':
