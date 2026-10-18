@@ -78,6 +78,8 @@ parser.add_argument('--load_pretrain', type=str2bool, default=False,
                     help='Load pre-trained TTSR weights for transfer learning')
 parser.add_argument('--pretrain_path', type=str, default='/root/data/pretrain_models/TTSR-rec.pt',
                     help='Path to pre-trained TTSR weights')
+parser.add_argument('--pretrain_require_core', type=str2bool, default=True,
+                    help='If True, fail when core MainNet/LTE tensors are missing from pretrain')
 parser.add_argument('--freeze_lte', type=str2bool, default=False,
                     help='Freeze LTE (VGG) weights during training')
 parser.add_argument('--freeze_stages', type=str, default='sfe,stage1,stage2',

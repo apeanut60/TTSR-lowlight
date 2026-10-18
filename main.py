@@ -69,8 +69,10 @@ if __name__ == '__main__':
         # Optionally load pre-trained TTSR weights for transfer learning
         if args.load_pretrain and args.pretrain_path:
             _logger.info('Loading pre-trained weights from: ' + args.pretrain_path)
+            _require_core = getattr(args, 'pretrain_require_core', True)
             _model = TTSREnhance.load_pretrained_weights(
-                _model, args.pretrain_path, device)
+                _model, args.pretrain_path, device,
+                require_core=_require_core)
         if getattr(args, 'freeze_stages', ''):
             _model, frozen_names = Trainer.freeze_mainnet_stages(
                 _model, args.freeze_stages, args.num_gpu)

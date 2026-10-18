@@ -47,6 +47,8 @@ def main():
     ap.add_argument('--log_every', type=int, default=100)
     ap.add_argument('--limit_steps', type=int, default=0)
     ap.add_argument('--allow_overwrite', action='store_true')
+    ap.add_argument('--expect_train_n', type=int, default=500,
+                    help='0 = skip train-size check (e.g. LOLv2 n=639)')
     a = ap.parse_args()
 
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -73,8 +75,9 @@ def main():
     train_cache = os.path.join(a.out_root, 'cache_p2_train')
     eval_cache = os.path.join(a.out_root, 'cache_p2_eval')
     print('rows train=%d eval=%d' % (len(tr_rows), len(ev_rows)))
-    if len(tr_rows) != 500:
-        raise SystemExit('expected 500 Huawei train rows, got %d' % len(tr_rows))
+    if a.expect_train_n and len(tr_rows) != a.expect_train_n:
+        raise SystemExit('expected %d train rows, got %d' % (
+            a.expect_train_n, len(tr_rows)))
     train_meta = verify_cache(train_cache)
     eval_meta = verify_cache(eval_cache)
     print('P2 cache sha %s' % train_meta['_base_sha'][:16])
