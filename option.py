@@ -68,12 +68,26 @@ parser.add_argument('--enhance_mode', type=str2bool, default=True,
                     help='Use low-light enhancement mode (1:1 resolution) instead of super-resolution (4x)')
 
 ### model setting
+parser.add_argument('--backbone', type=str, default='csfi_unet',
+                    help='Enhancement backbone: csfi_unet (ASRT Stage-A, default) '
+                         'or mainnet (legacy same-res MainNetEnhance for old ckpts)')
 parser.add_argument('--num_res_blocks', type=str, default='8+8+4+2',
-                    help='The number of residual blocks in each stage (lighter for 1:1 enhancement)')
+                    help='Residual blocks per stage: SFE+coarse+middle+fine '
+                         '(default 8+8+4+2 for csfi_unet; use 10+10+6+4 for legacy mainnet ckpts)')
 parser.add_argument('--n_feats', type=int, default=64,
                     help='The number of channels in network')
 parser.add_argument('--res_scale', type=float, default=1.,
                     help='Residual scale')
+parser.add_argument('--igab_blocks', type=str, default='1,1',
+                    help='IGAB depth at coarse(H/4),middle(H/2), e.g. 1,1')
+parser.add_argument('--igab_heads', type=int, default=1,
+                    help='IGAB attention heads (n_feats must be divisible)')
+parser.add_argument('--enable_lightup', type=str2bool, default=True,
+                    help='CSFI-U-Net: IlluminationEstimator light-up residual base Y_base')
+parser.add_argument('--use_global_illum', type=str2bool, default=False,
+                    help='CSFI-U-Net: enable GlobalIllumHead (Stage-A default off)')
+parser.add_argument('--use_ref_illum', type=str2bool, default=False,
+                    help='CSFI-U-Net: enable RefIllumTransfer (Stage-A default off)')
 parser.add_argument('--load_pretrain', type=str2bool, default=False,
                     help='Load pre-trained TTSR weights for transfer learning')
 parser.add_argument('--pretrain_path', type=str, default='/root/data/pretrain_models/TTSR-rec.pt',

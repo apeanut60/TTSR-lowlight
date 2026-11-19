@@ -8,11 +8,27 @@ Key differences from TTSR:
 """
 
 from model import MainNetEnhance, LTE, SearchTransfer
+from model.CSFIUNet import CSFIUNet
 from model.query_illum_align import align_query_illumination
 
+import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
+
+def _pad_to_multiple(x, multiple=4):
+    """Reflect-pad H/W up to the next multiple (ASRT-style)."""
+    if x is None:
+        return None, (0, 0)
+    h, w = x.shape[-2:]
+    th = int(math.ceil(h / float(multiple)) * multiple)
+    tw = int(math.ceil(w / float(multiple)) * multiple)
+    ph, pw = th - h, tw - w
+    if ph == 0 and pw == 0:
+        return x, (h, w)
+    mode = 'reflect' if ph < h and pw < w else 'replicate'
+    return F.pad(x, (0, pw, 0, ph), mode=mode), (h, w)
 
 
 class RefCorrectionHead(nn.Module):
@@ -53,11 +69,29 @@ class TTSREnhance(nn.Module):
         self.args = args
         self.num_res_blocks = list(
             map(int, args.num_res_blocks.split('+')))
-        self.MainNet = MainNetEnhance.MainNetEnhance(
-            num_res_blocks=self.num_res_blocks,
-            n_feats=args.n_feats,
-            res_scale=args.res_scale,
-            ref_illum_pool=getattr(args, 'ref_illum_pool', 8))
+        backbone = str(getattr(args, 'backbone', 'csfi_unet')).strip().lower()
+        self.backbone_name = backbone
+        if backbone in ('csfi_unet', 'csfi', 'asrt'):
+            igab_blocks = getattr(args, 'igab_blocks', '1,1')
+            self.MainNet = CSFIUNet(
+                num_res_blocks=args.num_res_blocks,
+                n_feats=args.n_feats,
+                res_scale=args.res_scale,
+                igab_blocks=igab_blocks,
+                igab_heads=int(getattr(args, 'igab_heads', 1)),
+                enable_lightup=bool(getattr(args, 'enable_lightup', True)),
+                use_global_illum=bool(getattr(args, 'use_global_illum', False)),
+                use_ref_illum=bool(getattr(args, 'use_ref_illum', False)),
+                ref_illum_pool=getattr(args, 'ref_illum_pool', 8))
+        elif backbone in ('mainnet', 'mainnet_enhance', 'same_res'):
+            self.MainNet = MainNetEnhance.MainNetEnhance(
+                num_res_blocks=self.num_res_blocks,
+                n_feats=args.n_feats,
+                res_scale=args.res_scale,
+                ref_illum_pool=getattr(args, 'ref_illum_pool', 8))
+        else:
+            raise ValueError(
+                'Unknown backbone %r (expected csfi_unet|mainnet)' % backbone)
         freeze_lte = getattr(args, 'freeze_lte', False)
         self.LTE = LTE.LTE(requires_grad=not freeze_lte)
         self.LTE_copy = LTE.LTE(
@@ -100,12 +134,26 @@ class TTSREnhance(nn.Module):
                 collect_gate_stats=False,
                 disable_T_lv3=None, disable_T_lv2=None, disable_T_lv1=None,
                 stage_mode_lv3=None, stage_mode_lv2=None, stage_mode_lv1=None,
-                collect_residual_decomp=False):
+                collect_residual_decomp=False, stem=None):
         if (type(sr) != type(None)):
             # Used in transferal perceptual loss
             self.LTE_copy.load_state_dict(self.LTE.state_dict())
             sr_lv1, sr_lv2, sr_lv3 = self.LTE_copy((sr + 1.) / 2.)
             return sr_lv1, sr_lv2, sr_lv3
+
+        # CSFI-U-Net needs H/W divisible by 4 so LTE/SearchTransfer grids match
+        # the encoder downs. Pad before LTE; crop after MainNet.
+        # When ``stem`` is provided (tiled full-image illum), inputs are already
+        # on a /4 canvas and must not be padded again.
+        use_csfi = isinstance(self.MainNet, CSFIUNet)
+        orig_hw = None
+        if use_csfi and lr is not None and stem is None:
+            lr, orig_hw = _pad_to_multiple(lr, 4)
+            lrsr, _ = _pad_to_multiple(lrsr, 4)
+            if ref is not None:
+                ref, _ = _pad_to_multiple(ref, 4)
+            if refsr is not None:
+                refsr, _ = _pad_to_multiple(refsr, 4)
 
         # Extract VGG features for search and texture transfer
         # lrsr/refsr are raw images at the same resolution (no bicubic needed)
@@ -288,9 +336,8 @@ class TTSREnhance(nn.Module):
             collect_residual_decomp = bool(
                 getattr(self.args, 'collect_residual_decomp', False))
 
-        # MainNetEnhance at 1:1 resolution (original Low, not low_query)
-        sr = self.MainNet(
-            lr, S, T_lv3, T_lv2, T_lv1,
+        # Backbone at 1:1 resolution (original Low, not low_query)
+        main_kwargs = dict(
             apply_illum=apply_illum, ref=ref_input,
             apply_ref_illum=apply_ref_illum,
             gate_mode=gate_mode, gate_shift=gate_shift,
@@ -303,6 +350,12 @@ class TTSREnhance(nn.Module):
             stage_mode_lv2=stage_mode_lv2,
             stage_mode_lv1=stage_mode_lv1,
             collect_residual_decomp=collect_residual_decomp)
+        if use_csfi and stem is not None:
+            main_kwargs['stem'] = stem
+        sr = self.MainNet(lr, S, T_lv3, T_lv2, T_lv1, **main_kwargs)
+
+        if use_csfi and orig_hw is not None:
+            sr = sr[..., :orig_hw[0], :orig_hw[1]]
 
         if return_ref:
             out = (sr, S, T_lv3, T_lv2, T_lv1, ref_input)
