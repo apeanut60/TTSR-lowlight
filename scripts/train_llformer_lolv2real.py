@@ -60,12 +60,12 @@ def list_test_names(data_dir):
 
 def resolve_train_names(lock, select_split):
     if select_split == 'test':
-        path = lock.get('train689_path') or lock.get('train625_path')
+        path = (lock.get('train_path') or lock.get('train689_path')
+                or lock.get('train625_path'))
         if not path or not os.path.isfile(path):
-            raise SystemExit('lock missing train689_path for select_split=test')
+            raise SystemExit('lock missing train_path for select_split=test')
         names = read_split_txt(path)
-        if len(names) < 689:
-            # allow merge fallback
+        if lock.get('train689_path') and path == lock.get('train689_path') and len(names) < 689:
             d64 = lock.get('dev64_path')
             if d64 and os.path.isfile(d64):
                 names = sorted(set(names) | set(read_split_txt(d64)))
@@ -116,6 +116,8 @@ def main():
     ap.add_argument('--patch', type=int, default=PATCH)
     ap.add_argument('--lr_initial', type=float, default=LR_INITIAL)
     ap.add_argument('--lr_min', type=float, default=None)
+    ap.add_argument('--warmup', type=int, default=None,
+                    help='cosine warmup epochs (official LOL recipe: 3)')
     ap.add_argument('--seed', type=int, default=SEED)
     ap.add_argument('--num_workers', type=int, default=4)
     ap.add_argument('--stage', default='A1')
@@ -131,6 +133,9 @@ def main():
     if a.lr_min is None:
         from llformer_runtime import LR_MIN
         a.lr_min = LR_MIN
+    if a.warmup is None:
+        from llformer_runtime import WARMUP_EPOCHS
+        a.warmup = WARMUP_EPOCHS
 
     lock_path = os.path.join(a.root, 'artifact_lock.json')
     if not os.path.isfile(lock_path):
@@ -203,9 +208,9 @@ def main():
               flush=True)
 
     log_path = os.path.join(a.root, 'logs', 'train_%s.log' % a.stage.lower())
-    print('=== %s train epochs=%d batch=%d patch=%d lr0=%.2e '
+    print('=== %s train epochs=%d batch=%d patch=%d lr0=%.2e warmup=%d '
           'select=%s n_train=%d ==='
-          % (a.stage, a.epochs, a.batch, a.patch, a.lr_initial,
+          % (a.stage, a.epochs, a.batch, a.patch, a.lr_initial, a.warmup,
              a.select_split, len(train_names)), flush=True)
 
     def log(msg):
@@ -259,9 +264,10 @@ def main():
     # Store epoch=109 so E*=110 if init remains best (matches A1 E_star).
     if start_ep == 0 and not a.resume:
         log('[seed] evaluating init on %s before train' % a.select_split)
-        seed_ep_idx = 109 if a.select_split == 'test' else -1
+        # Optional label so a continued ckpt keeps its old epoch id (A3 E110).
+        seed_ep_idx = int(lock.get('seed_epoch_index', -1))
         ev0 = run_select_eval(0, ep_idx_for_ckpt=seed_ep_idx)
-        # best_ep for patience: treat seed as ep 0 (no trained improve yet)
+        # Patience counts trained epochs only; seed is not a trained best.
         if a.select_split == 'test':
             best_ep = 0
         log('[seed] %s_psnr=%.4f %s_ssim=%.4f'
@@ -278,7 +284,8 @@ def main():
     t0 = time.time()
     stopped_early = False
     for ep in range(start_ep, a.epochs):
-        lr = cosine_lr(ep, epochs=a.epochs, lr0=a.lr_initial, lr_min=a.lr_min)
+        lr = cosine_lr(ep, epochs=a.epochs, warmup=a.warmup,
+                       lr0=a.lr_initial, lr_min=a.lr_min)
         for g in opt.param_groups:
             g['lr'] = lr
         net.train()
