@@ -8,24 +8,32 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import os
 import platform
+import random
 import subprocess
 import sys
-import tempfile
+import uuid
 from datetime import datetime
 from types import SimpleNamespace
 
+import numpy as np
 import torch
-import torch.nn as nn
-import torch.nn.functional as F
 import torch.optim as optim
 from torch.utils.data import DataLoader
 
+from block_amend_ckpt import (
+    CHECKPOINT_SCHEMA_VERSION, LOCKED_CONFIG_KEYS, RESUME_ALLOWED_OVERRIDES,
+    atomic_torch_save, build_checkpoint_pack, capture_rng_state,
+    check_grad_finite, explicit_cli_dests, merge_resume_config,
+    require_resume_fields, resolved_config_from_args, restore_rng_state,
+)
 from dataset.block_amend_lolv2 import (
     BlockAmendEvalSet, BlockAmendTrainSet, collect_triplets,
-    load_manifest_items, manifest_hash, save_split_manifests, split_train_val,
-    write_coverage_manifests,
+    load_manifest_items, manifest_identity_hash, save_split_manifests,
+    split_train_val, validate_split_manifests, write_coverage_manifests,
+    MANIFEST_HASH_VERSION,
 )
 from model.TTSREnhance import TTSREnhance
 from model.weight_init import apply_init_mode, load_strict_state, log_param_groups
@@ -110,6 +118,13 @@ def _git_info(root: str) -> dict:
     return info
 
 
+def worker_init_fn(worker_id: int):
+    """Top-level picklable worker init (Python/NumPy only)."""
+    worker_seed = torch.initial_seed() % (2 ** 32)
+    np.random.seed(worker_seed)
+    random.seed(worker_seed)
+
+
 def build_parser():
     p = argparse.ArgumentParser(description='block-amend CSFI baseline')
     p.add_argument('--mode', type=str, required=True,
@@ -150,6 +165,8 @@ def build_parser():
                    help='eval mode: internal val or Official Test')
     p.add_argument('--save_images', action='store_true')
     p.add_argument('--log_file_name', type=str, default='block_amend.log')
+    p.add_argument('--persistent_workers', action='store_true',
+                   help='Not supported for epoch-aware aug; will error if set')
     return p
 
 
@@ -158,6 +175,7 @@ def make_args(cli) -> SimpleNamespace:
     d.update(vars(cli))
     d['dataset'] = 'block_amend_lolv2'
     d['logger_name'] = 'block_amend'
+    d['metric_protocol'] = PROTOCOL_NAME
     return SimpleNamespace(**d)
 
 
@@ -170,24 +188,8 @@ def ensure_save_dir_fresh(save_dir: str):
     os.makedirs(save_dir, exist_ok=True)
 
 
-def atomic_torch_save(obj, path: str):
-    os.makedirs(os.path.dirname(path) or '.', exist_ok=True)
-    fd, tmp = tempfile.mkstemp(prefix='.tmp_ckpt_', dir=os.path.dirname(path) or '.')
-    os.close(fd)
-    try:
-        torch.save(obj, tmp)
-        os.replace(tmp, path)
-    finally:
-        if os.path.exists(tmp):
-            try:
-                os.remove(tmp)
-            except OSError:
-                pass
-
-
 def build_model(args, device):
     model = TTSREnhance(args).to(device)
-    # freeze_lte already applied in TTSREnhance via LTE(requires_grad=False)
     if args.freeze_stages:
         from trainer import Trainer
         model, names = Trainer.freeze_mainnet_stages(
@@ -198,10 +200,6 @@ def build_model(args, device):
 
 def build_optimizer(model, args):
     wrap = model.module if hasattr(model, 'module') else model
-    groups = []
-    main_params = [p for p in wrap.MainNet.parameters() if p.requires_grad]
-    # Skip disabled photometric heads from "active" messaging; they may still
-    # exist with requires_grad True but use_*=False means unused in forward.
     if not args.use_global_illum:
         for n, p in wrap.MainNet.named_parameters():
             if n.startswith('global_illum_head.'):
@@ -210,6 +208,7 @@ def build_optimizer(model, args):
         for n, p in wrap.MainNet.named_parameters():
             if n.startswith('ref_illum.'):
                 p.requires_grad = False
+    groups = []
     main_params = [p for p in wrap.MainNet.parameters() if p.requires_grad]
     if main_params:
         groups.append({'params': main_params, 'lr': args.lr_rate})
@@ -222,24 +221,59 @@ def build_optimizer(model, args):
         groups.append({'params': lte, 'lr': args.lr_rate_lte})
     if not groups:
         raise RuntimeError('No trainable parameters')
-    # Dedup check
-    ids = []
+    seen = set()
     for g in groups:
         for p in g['params']:
-            if id(p) in ids:
+            if id(p) in seen:
                 raise RuntimeError('Duplicate parameter in optimizer groups')
-            ids.append(id(p))
+            seen.add(id(p))
     opt = optim.Adam(groups, betas=(args.beta1, args.beta2), eps=args.eps)
     sched = optim.lr_scheduler.StepLR(opt, step_size=args.decay, gamma=args.gamma)
     return opt, sched
 
 
-def prepare_data(args, logger):
+def _load_locked_split(split_dir, args, require_files=True):
+    train_path = os.path.join(split_dir, 'split_train.json')
+    val_path = os.path.join(split_dir, 'split_val.json')
+    if require_files and (not os.path.isfile(train_path) or not os.path.isfile(val_path)):
+        raise FileNotFoundError(
+            'Locked split manifests missing under %s (train=%s val=%s). '
+            'Resume/eval must not re-split.'
+            % (split_dir, os.path.isfile(train_path), os.path.isfile(val_path)))
+    train_items = load_manifest_items(train_path)
+    val_items = load_manifest_items(val_path)
+    identity = validate_split_manifests(
+        train_items, val_items, args.dataset_dir, args.train_ref_subdir,
+        batch_size=args.batch_size, drop_last=True)
+    return train_items, val_items, identity
+
+
+def prepare_data(args, logger, mode, explicit_split_dir: bool):
+    """Create or load locked train/val. Never re-split on resume."""
     split_dir = args.split_dir or os.path.join(args.save_dir, 'splits')
-    if args.mode == 'preflight' or not (
-            os.path.isfile(os.path.join(split_dir, 'split_train.json'))
-            and os.path.isfile(os.path.join(split_dir, 'split_val.json'))):
-        if args.allow_partial_coverage:
+    train_path = os.path.join(split_dir, 'split_train.json')
+    val_path = os.path.join(split_dir, 'split_val.json')
+    have = os.path.isfile(train_path) and os.path.isfile(val_path)
+
+    if mode == 'resume':
+        if not have:
+            raise RuntimeError(
+                'Resume requires existing split manifests at %s' % split_dir)
+        train_items, val_items, identity = _load_locked_split(split_dir, args)
+        logger.info('Resume locked split: %s' % json.dumps(identity))
+    elif mode == 'train' and explicit_split_dir:
+        if not have:
+            raise RuntimeError(
+                '--split_dir was set but manifests missing at %s' % split_dir)
+        train_items, val_items, identity = _load_locked_split(split_dir, args)
+        logger.info('Using explicit split_dir: %s' % json.dumps(identity))
+    elif mode == 'train' and have and not explicit_split_dir:
+        # save_dir/splits already exists under a fresh empty check — rare
+        train_items, val_items, identity = _load_locked_split(split_dir, args)
+        logger.info('Using existing split: %s' % json.dumps(identity))
+    else:
+        # fresh create
+        if getattr(args, 'allow_partial_coverage', False):
             cov = write_coverage_manifests(
                 args.dataset_dir, os.path.join(args.save_dir, 'coverage'),
                 subset='real', ref_subdir=args.train_ref_subdir, split='Train',
@@ -252,38 +286,44 @@ def prepare_data(args, logger):
                 ref_subdir=args.train_ref_subdir, require_all=True)
         train_items, val_items = split_train_val(
             include, val_ratio=args.val_ratio, split_seed=args.split_seed)
-        meta = save_split_manifests(train_items, val_items, split_dir)
-        logger.info('Created split: %s' % json.dumps(meta))
-    else:
-        train_items = load_manifest_items(
-            os.path.join(split_dir, 'split_train.json'))
-        val_items = load_manifest_items(
-            os.path.join(split_dir, 'split_val.json'))
-        # Validate manifested files still exist
-        for it in train_items + val_items:
-            for k in ('low', 'normal', 'ref'):
-                if not os.path.isfile(it[k]):
-                    raise FileNotFoundError(
-                        'Manifested file missing: id=%s %s=%s'
-                        % (it['id'], k, it[k]))
-        logger.info(
-            'Using existing split train=%d val=%d hashes=%s/%s'
-            % (len(train_items), len(val_items),
-               manifest_hash(train_items), manifest_hash(val_items)))
+        identity = save_split_manifests(
+            train_items, val_items, split_dir,
+            dataset_dir=args.dataset_dir, ref_subdir=args.train_ref_subdir,
+            batch_size=args.batch_size)
+        logger.info('Created split: %s' % json.dumps(identity))
+
+    if getattr(args, 'persistent_workers', False):
+        raise RuntimeError(
+            'persistent_workers=True is not supported with epoch-aware '
+            'augmentation (set_epoch would not reach workers).')
 
     train_set = BlockAmendTrainSet(
         train_items, crop_size=args.train_crop_size,
         ref_degrade=args.ref_degrade, seed=args.seed)
     val_set = BlockAmendEvalSet(val_items)
+
+    train_gen = torch.Generator()
+    train_gen.manual_seed(int(args.seed))
+    val_gen = torch.Generator()
+    val_gen.manual_seed(int(args.seed) + 1009)
+
     train_loader = DataLoader(
         train_set, batch_size=args.batch_size, shuffle=True,
-        num_workers=args.num_workers, drop_last=True)
+        num_workers=args.num_workers, drop_last=True,
+        worker_init_fn=worker_init_fn if args.num_workers > 0 else None,
+        generator=train_gen, persistent_workers=False)
     val_loader = DataLoader(
-        val_set, batch_size=1, shuffle=False, num_workers=args.num_workers)
-    return train_loader, val_loader, train_items, val_items, split_dir
+        val_set, batch_size=1, shuffle=False,
+        num_workers=args.num_workers,
+        worker_init_fn=worker_init_fn if args.num_workers > 0 else None,
+        generator=val_gen, persistent_workers=False)
+
+    return (train_loader, val_loader, train_set, val_set,
+            train_items, val_items, split_dir, identity, train_gen, val_gen)
 
 
-def evaluate_loader(model, loader, args, device, save_dir=None, tag='val'):
+def evaluate_loader(model, loader, args, device, save_dir=None, tag='val',
+                    split_identity=None):
     model.eval()
     rows = []
     psnr_sum = ssim_sum = 0.0
@@ -318,33 +358,36 @@ def evaluate_loader(model, loader, args, device, save_dir=None, tag='val'):
         'psnr_rgb_mean': psnr_sum / n,
         'ssim_rgb_mean': ssim_sum / n,
         'per_image': rows,
+        'split_identity': split_identity,
+        'manifest_hash_version': MANIFEST_HASH_VERSION,
     }
     return summary
 
 
-def save_run_meta(args, root, train_items, val_items, model, extra=None):
+def save_run_meta_fresh(args, root, identity, model, run_id, extra=None):
     wrap = model.module if hasattr(model, 'module') else model
     n_params = sum(p.numel() for p in wrap.parameters())
     meta = {
         'created_at': datetime.utcnow().isoformat() + 'Z',
+        'run_id': run_id,
         'git': _git_info(root),
         'python': sys.version,
         'platform': platform.platform(),
         'torch': torch.__version__,
         'n_params': int(n_params),
         'metric_protocol': PROTOCOL_NAME,
+        'checkpoint_schema_version': CHECKPOINT_SCHEMA_VERSION,
+        'manifest_hash_version': MANIFEST_HASH_VERSION,
         'reference_source': 'generated_nano',
         'train_ref_subdir': args.train_ref_subdir,
         'test_ref_subdir': args.test_ref_subdir,
-        'augmentation': 'paired_crop_flip_rot',
+        'augmentation': 'paired_crop_flip_rot_epoch_aware',
         'ref_degrade': bool(args.ref_degrade),
         'init_scope': args.init_scope,
         'init_checkpoint': args.init_checkpoint,
-        'config': {k: getattr(args, k) for k in BASELINE_FIXED},
-        'train_hash': manifest_hash(train_items),
-        'val_hash': manifest_hash(val_items),
-        'train_count': len(train_items),
-        'val_count': len(val_items),
+        'config': resolved_config_from_args(args),
+        'split_identity': identity,
+        'resume_history': [],
     }
     if extra:
         meta.update(extra)
@@ -354,14 +397,56 @@ def save_run_meta(args, root, train_items, val_items, model, extra=None):
     return path
 
 
+def append_resume_record(save_dir, record: dict):
+    path = os.path.join(save_dir, 'run_meta.json')
+    if os.path.isfile(path):
+        with open(path) as f:
+            meta = json.load(f)
+    else:
+        meta = {'resume_history': []}
+    meta.setdefault('resume_history', []).append(record)
+    with open(path, 'w') as f:
+        json.dump(meta, f, indent=2, default=str)
+
+
+def _assert_best_identity_safe(save_dir, pack, logger):
+    """Refuse resume that would risk overwriting a better best with worse state."""
+    best_path = os.path.join(save_dir, 'checkpoint_best_val_psnr.pt')
+    if not os.path.isfile(best_path):
+        return
+    best = torch.load(best_path, map_location='cpu')
+    if not isinstance(best, dict):
+        raise RuntimeError('Corrupt best checkpoint at %s' % best_path)
+    if best.get('run_id') and pack.get('run_id') and best['run_id'] != pack['run_id']:
+        raise RuntimeError(
+            'best checkpoint run_id=%s != resume pack run_id=%s'
+            % (best.get('run_id'), pack.get('run_id')))
+    # Historical best in pack must not be worse than on-disk best bookkeeping
+    on_disk = float(best.get('best_val_psnr', -1))
+    in_pack = float(pack.get('best_val_psnr', -1))
+    if on_disk > in_pack + 1e-8:
+        raise RuntimeError(
+            'Resume last.best_val_psnr=%.6f < on-disk best=%.6f (epoch %s). '
+            'Refusing to continue (would risk overwriting better best).'
+            % (in_pack, on_disk, best.get('best_epoch')))
+    logger.info('Best identity OK: best_val_psnr=%.4f best_epoch=%s'
+                % (on_disk, best.get('best_epoch')))
+
+
 def train_loop(args, logger, model, opt, sched, train_loader, val_loader,
-               start_epoch=1, global_step=0, best_psnr=-1.0):
+               train_set, train_gen, val_gen, split_identity, run_id,
+               start_epoch=1, global_step=0, best_psnr=-1.0, best_epoch=0):
     device = next(model.parameters()).device
-    # Minimal loss dict (reuse enhance losses; only rec + ms_ssim active)
     loss_all = get_loss_dict_enhance(args, logger)
+    last_path = os.path.join(args.save_dir, 'checkpoint_last.pt')
+    best_path = os.path.join(args.save_dir, 'checkpoint_best_val_psnr.pt')
+
     for epoch in range(start_epoch, args.num_epochs + 1):
+        # Epoch-aware aug BEFORE creating the iterator (persistent_workers=False).
+        train_set.set_epoch(epoch)
         model.train()
         logger.info('Epoch %d lr=%e' % (epoch, opt.param_groups[0]['lr']))
+        n_batches = 0
         for i_batch, batch in enumerate(train_loader):
             opt.zero_grad(set_to_none=True)
             lr = batch['LR'].to(device)
@@ -369,50 +454,41 @@ def train_loop(args, logger, model, opt, sched, train_loader, val_loader,
             hr = batch['HR'].to(device)
             ref = batch['Ref'].to(device)
             refsr = batch['Ref_sr'].to(device)
+            sid = batch.get('id', '?')
             sr, *_ = model(lr=lr, lrsr=lrsr, ref=ref, refsr=refsr)
             loss = args.rec_w * loss_all['rec_loss'](sr, hr)
+            loss_terms = {'rec': float(loss.detach())}
             if 'ms_ssim_loss' in loss_all and args.ms_ssim_w > 0:
-                loss = loss + args.ms_ssim_w * loss_all['ms_ssim_loss'](sr, hr)
+                ms = args.ms_ssim_w * loss_all['ms_ssim_loss'](sr, hr)
+                loss = loss + ms
+                loss_terms['ms_ssim'] = float(ms.detach())
             if (not torch.isfinite(loss).all()) or (not torch.isfinite(sr).all()):
                 raise RuntimeError(
-                    'Non-finite at epoch=%d step=%d id=%s loss=%s'
-                    % (epoch, i_batch + 1, batch.get('id', '?'), loss.detach()))
+                    'Non-finite loss/output epoch=%d step=%d id=%s loss=%s terms=%s'
+                    % (epoch, i_batch + 1, sid, loss.detach(), loss_terms))
             loss.backward()
+            check_grad_finite(model, epoch, i_batch + 1, sid, loss, sr)
             opt.step()
             global_step += 1
+            n_batches += 1
             if (i_batch + 1) % args.print_every == 0:
                 logger.info('epoch %d batch %d loss %.6f'
                             % (epoch, i_batch + 1, float(loss)))
 
-        # Scheduler after optimizer steps for this epoch.
+        if n_batches == 0:
+            raise RuntimeError(
+                'Epoch %d produced zero batches (check batch_size/drop_last)'
+                % epoch)
+
+        # Scheduler once per completed epoch after optimizer updates.
         sched.step()
 
-        # last checkpoint (atomic)
-        pack = {
-            'model_state_dict': {
-                k.replace('module.', ''): v
-                for k, v in model.state_dict().items() if '_copy' not in k
-            },
-            'optimizer_state_dict': opt.state_dict(),
-            'scheduler_state_dict': sched.state_dict(),
-            'epoch': epoch,
-            'global_step': global_step,
-            'best_val_psnr': best_psnr,
-            'config': {k: getattr(args, k) for k in BASELINE_FIXED},
-            'init_scope': args.init_scope,
-            'metric_protocol': PROTOCOL_NAME,
-            'rng': {
-                'torch': torch.get_rng_state(),
-                'cuda': (torch.cuda.get_rng_state_all()
-                         if torch.cuda.is_available() else None),
-            },
-        }
-        atomic_torch_save(pack, os.path.join(args.save_dir, 'checkpoint_last.pt'))
-
-        if epoch % args.val_every == 0:
+        did_val = (epoch % args.val_every == 0)
+        if did_val:
             summary = evaluate_loader(
                 model, val_loader, args, device,
-                save_dir=args.save_dir, tag='val_ep%05d' % epoch)
+                save_dir=args.save_dir, tag='val_ep%05d' % epoch,
+                split_identity=split_identity)
             with open(os.path.join(
                     args.save_dir, 'val_metrics_ep%05d.json' % epoch), 'w') as f:
                 json.dump(summary, f, indent=2)
@@ -420,44 +496,111 @@ def train_loop(args, logger, model, opt, sched, train_loader, val_loader,
                 'val epoch %d PSNR_rgb %.4f SSIM %.4f (%s)'
                 % (epoch, summary['psnr_rgb_mean'], summary['ssim_rgb_mean'],
                    PROTOCOL_NAME))
+            # Strict improvement only (ties do not overwrite best).
             if summary['psnr_rgb_mean'] > best_psnr:
-                best_psnr = summary['psnr_rgb_mean']
-                pack['best_val_psnr'] = best_psnr
-                atomic_torch_save(
-                    pack, os.path.join(args.save_dir, 'checkpoint_best_val_psnr.pt'))
-                logger.info('New best_val_psnr=%.4f' % best_psnr)
+                best_psnr = float(summary['psnr_rgb_mean'])
+                best_epoch = int(epoch)
+
+        # Build pack AFTER val/best update so last carries true historical best.
+        rng_state = capture_rng_state(train_gen, val_gen)
+        pack = build_checkpoint_pack(
+            model=model, opt=opt, sched=sched,
+            epoch=epoch, global_step=global_step,
+            best_val_psnr=best_psnr, best_epoch=best_epoch,
+            validation_completed=did_val,
+            args=args, split_identity=split_identity,
+            init_scope=args.init_scope,
+            init_checkpoint=getattr(args, 'init_checkpoint', '') or '',
+            run_id=run_id, rng_state=rng_state,
+            metric_protocol=PROTOCOL_NAME,
+        )
+
+        # Save best first (if improved this epoch), then last.
+        if did_val and best_epoch == epoch:
+            atomic_torch_save(pack, best_path)
+            logger.info('New best_val_psnr=%.4f best_epoch=%d' % (best_psnr, best_epoch))
+        atomic_torch_save(pack, last_path)
 
 
-def main():
-    cli = build_parser().parse_args()
-    args = make_args(cli)
+def main(argv=None):
+    argv = list(sys.argv[1:] if argv is None else argv)
+    explicit = explicit_cli_dests(argv)
+    parser = build_parser()
+    cli = parser.parse_args(argv)
     root = os.path.dirname(os.path.abspath(__file__))
-    if args.run_name:
-        args.save_dir = os.path.join(args.save_dir, args.run_name)
 
-    if args.mode == 'train':
-        ensure_save_dir_fresh(args.save_dir)
-    else:
+    if cli.run_name:
+        cli.save_dir = os.path.join(cli.save_dir, cli.run_name)
+
+    device = torch.device('cpu' if cli.cpu else 'cuda')
+
+    # ---------- resume: config from checkpoint first ----------
+    if cli.mode == 'resume':
+        if not cli.resume_checkpoint:
+            raise SystemExit('resume requires --resume_checkpoint')
+        raw = torch.load(cli.resume_checkpoint, map_location='cpu')
+        require_resume_fields(raw)
+        args, applied = merge_resume_config(
+            raw['config'], cli, explicit, BASELINE_FIXED)
+        args.resume_checkpoint = cli.resume_checkpoint
+        args.save_dir = cli.save_dir
+        if 'dataset_dir' in explicit:
+            args.dataset_dir = cli.dataset_dir
+        if 'split_dir' in explicit:
+            args.split_dir = cli.split_dir
+        args.mode = 'resume'
+        # Extending num_epochs must not rebuild StepLR from scratch later
         os.makedirs(args.save_dir, exist_ok=True)
+    elif cli.mode == 'eval':
+        if not cli.model_path:
+            raise SystemExit('eval requires --model_path')
+        raw = torch.load(cli.model_path, map_location='cpu')
+        if isinstance(raw, dict) and 'config' in raw and 'model_state_dict' in raw:
+            args, applied = merge_resume_config(
+                raw['config'], cli, explicit, BASELINE_FIXED)
+            args.model_path = cli.model_path
+            args.mode = 'eval'
+            args.eval_split = cli.eval_split
+            args.save_images = cli.save_images
+            args.save_dir = cli.save_dir
+            os.makedirs(args.save_dir, exist_ok=True)
+        else:
+            # Bare weights: require explicit locked config on CLI
+            missing = [k for k in ('backbone', 'num_res_blocks', 'n_feats',
+                                   'enable_lightup', 'stage_mode_lv2')
+                       if k not in explicit]
+            if missing:
+                raise SystemExit(
+                    'Bare weights require explicit config on CLI for %s '
+                    '(refusing silent defaults)' % missing)
+            args = make_args(cli)
+            applied = {k: getattr(cli, k) for k in explicit if hasattr(cli, k)}
+            os.makedirs(args.save_dir, exist_ok=True)
+            raw = {'model_state_dict': raw} if not (
+                isinstance(raw, dict) and 'model_state_dict' in raw) else raw
+    else:
+        args = make_args(cli)
+        applied = {}
+        if args.mode == 'train':
+            ensure_save_dir_fresh(args.save_dir)
+        else:
+            os.makedirs(args.save_dir, exist_ok=True)
 
-    logger = Logger(args.log_file_name, args.logger_name).get_log()
-    # Redirect log file into save_dir
-    log_path = os.path.join(args.save_dir, args.log_file_name)
-    fh = __import__('logging').FileHandler(log_path)
-    logger.addHandler(fh)
+    logger = Logger(
+        os.path.join(args.save_dir, args.log_file_name),
+        getattr(args, 'logger_name', 'block_amend')).get_log()
 
-    device = torch.device('cpu' if args.cpu else 'cuda')
-    if args.seed >= 0:
-        import random
-        import numpy as np
+    # Seed only for fresh/preflight before any RNG capture; resume restores later.
+    if args.mode in ('train', 'preflight', 'eval') and int(args.seed) >= 0:
         random.seed(args.seed)
         np.random.seed(args.seed)
         torch.manual_seed(args.seed)
-        if torch.cuda.is_available():
+        if torch.cuda.is_available() and not args.cpu:
             torch.cuda.manual_seed_all(args.seed)
 
     if args.mode == 'preflight':
         logger.info('Preflight only — no training')
+        logger.info('Python %s  PyTorch %s' % (sys.version.split()[0], torch.__version__))
         if args.allow_partial_coverage:
             cov = write_coverage_manifests(
                 args.dataset_dir, os.path.join(args.save_dir, 'coverage'),
@@ -469,13 +612,11 @@ def main():
                 args.dataset_dir, 'Train', subset='real',
                 ref_subdir=args.train_ref_subdir, require_all=True)
             logger.info('Train triplets ok=%d missing_ref=%d' % (len(ok), len(missing)))
-        # Also check Official Test refs exist (do not evaluate)
         test_ok, test_miss = collect_triplets(
             args.dataset_dir, 'Test', subset='real',
             ref_subdir=args.test_ref_subdir, require_all=False)
         logger.info('Test triplets available=%d missing_ref=%d'
                     % (len(test_ok), len(test_miss)))
-        # Build model once to verify init
         model = build_model(args, device)
         apply_init_mode(model, args, device=device, logger=logger)
         log_param_groups(model, logger)
@@ -483,8 +624,6 @@ def main():
         return
 
     if args.mode == 'eval':
-        if not args.model_path:
-            raise SystemExit('eval requires --model_path')
         model = build_model(args, device)
         load_strict_state(model, args.model_path, device=device, logger=logger,
                           mode='inference')
@@ -492,17 +631,31 @@ def main():
             items, _ = collect_triplets(
                 args.dataset_dir, 'Test', subset='real',
                 ref_subdir=args.test_ref_subdir, require_all=True)
+            # Synthetic identity for test
+            identity = {
+                'train_hash': None,
+                'val_hash': manifest_identity_hash(
+                    items, args.dataset_dir, 'test', args.test_ref_subdir),
+                'ref_subdir': args.test_ref_subdir,
+            }
             loader = DataLoader(BlockAmendEvalSet(items), batch_size=1,
-                                shuffle=False, num_workers=args.num_workers)
+                                shuffle=False, num_workers=args.num_workers,
+                                persistent_workers=False)
             tag = 'official_test'
         else:
-            split_dir = args.split_dir or os.path.join(args.save_dir, 'splits')
-            items = load_manifest_items(os.path.join(split_dir, 'split_val.json'))
-            loader = DataLoader(BlockAmendEvalSet(items), batch_size=1,
-                                shuffle=False, num_workers=args.num_workers)
+            split_dir = args.split_dir or os.path.join(
+                os.path.dirname(args.model_path), 'splits')
+            if args.split_dir == '' and not os.path.isdir(split_dir):
+                # try save_dir/splits
+                split_dir = os.path.join(args.save_dir, 'splits')
+            train_items, val_items, identity = _load_locked_split(split_dir, args)
+            loader = DataLoader(BlockAmendEvalSet(val_items), batch_size=1,
+                                shuffle=False, num_workers=args.num_workers,
+                                persistent_workers=False)
             tag = 'val'
         summary = evaluate_loader(
-            model, loader, args, device, save_dir=args.save_dir, tag=tag)
+            model, loader, args, device, save_dir=args.save_dir, tag=tag,
+            split_identity=identity)
         out = os.path.join(args.save_dir, 'eval_%s.json' % tag)
         with open(out, 'w') as f:
             json.dump(summary, f, indent=2)
@@ -510,54 +663,70 @@ def main():
                     % (tag, summary['psnr_rgb_mean'], summary['ssim_rgb_mean'], out))
         return
 
-    # train / resume
-    train_loader, val_loader, train_items, val_items, split_dir = prepare_data(
-        args, logger)
-    model = build_model(args, device)
+    # ---------- train / resume training ----------
+    explicit_split = 'split_dir' in explicit and bool(cli.split_dir)
+    (train_loader, val_loader, train_set, val_set,
+     train_items, val_items, split_dir, identity,
+     train_gen, val_gen) = prepare_data(
+        args, logger, mode=args.mode, explicit_split_dir=explicit_split)
 
-    start_epoch, global_step, best_psnr = 1, 0, -1.0
     if args.mode == 'resume':
-        if not args.resume_checkpoint:
-            raise SystemExit('resume requires --resume_checkpoint')
         raw = torch.load(args.resume_checkpoint, map_location=device)
-        if not isinstance(raw, dict) or 'model_state_dict' not in raw:
-            raise SystemExit(
-                'Resume checkpoint must be a training pack with model_state_dict')
-        # Config check
-        cfg = raw.get('config') or {}
-        for k, v in BASELINE_FIXED.items():
-            if k in cfg and cfg[k] != v and k in (
-                    'backbone', 'num_res_blocks', 'n_feats', 'enable_lightup'):
-                raise SystemExit(
-                    'Resume config mismatch for %s: ckpt=%r expected=%r' % (k, cfg[k], v))
+        require_resume_fields(raw)
+        # Split identity must match
+        ckpt_id = raw['split_identity']
+        for key in ('train_hash', 'val_hash', 'ref_subdir'):
+            if ckpt_id.get(key) != identity.get(key):
+                raise RuntimeError(
+                    'Split identity mismatch on %s: ckpt=%r live=%r'
+                    % (key, ckpt_id.get(key), identity.get(key)))
+        run_id = raw.get('run_id') or str(uuid.uuid4())
+        model = build_model(args, device)
         load_strict_state(model, args.resume_checkpoint, device=device,
                           logger=logger, mode='resume')
         opt, sched = build_optimizer(model, args)
-        if 'optimizer_state_dict' in raw:
-            opt.load_state_dict(raw['optimizer_state_dict'])
-        if 'scheduler_state_dict' in raw:
-            sched.load_state_dict(raw['scheduler_state_dict'])
-        start_epoch = int(raw.get('epoch', 0)) + 1
-        global_step = int(raw.get('global_step', 0))
-        best_psnr = float(raw.get('best_val_psnr', -1.0))
-        logger.info('Resumed from epoch %d global_step %d best=%.4f'
-                    % (start_epoch - 1, global_step, best_psnr))
+        opt.load_state_dict(raw['optimizer_state_dict'])
+        sched.load_state_dict(raw['scheduler_state_dict'])
+        # Restore RNG after model/opt construction, before next epoch iterator
+        restore_rng_state(raw['rng'], train_gen, val_gen)
+        start_epoch = int(raw['epoch']) + 1
+        global_step = int(raw['global_step'])
+        best_psnr = float(raw['best_val_psnr'])
+        best_epoch = int(raw.get('best_epoch', 0))
+        _assert_best_identity_safe(args.save_dir, raw, logger)
+        append_resume_record(args.save_dir, {
+            'resumed_at': datetime.utcnow().isoformat() + 'Z',
+            'from_checkpoint': args.resume_checkpoint,
+            'next_epoch': start_epoch,
+            'best_val_psnr': best_psnr,
+            'best_epoch': best_epoch,
+            'explicit_overrides': applied,
+            'split_identity': identity,
+        })
+        logger.info(
+            'Resumed schema=%s epoch=%d -> next=%d step=%d best=%.4f@%d overrides=%s'
+            % (raw['checkpoint_schema_version'], raw['epoch'], start_epoch,
+               global_step, best_psnr, best_epoch, applied))
     else:
-        # fresh
         if args.init_scope == 'lte_only' and not args.init_checkpoint:
             raise SystemExit('lte_only requires --init_checkpoint')
         if args.init_scope == 'fresh' and args.init_checkpoint:
             raise SystemExit(
                 'fresh init must not set --init_checkpoint (got %s)'
                 % args.init_checkpoint)
+        run_id = str(uuid.uuid4())
+        model = build_model(args, device)
         apply_init_mode(model, args, device=device, logger=logger)
         opt, sched = build_optimizer(model, args)
+        save_run_meta_fresh(args, root, identity, model, run_id,
+                            extra={'split_dir': split_dir, 'mode': 'train'})
+        start_epoch, global_step, best_psnr, best_epoch = 1, 0, -1.0, 0
 
-    save_run_meta(args, root, train_items, val_items, model,
-                  extra={'split_dir': split_dir, 'mode': args.mode})
-    train_loop(args, logger, model, opt, sched, train_loader, val_loader,
-               start_epoch=start_epoch, global_step=global_step,
-               best_psnr=best_psnr)
+    train_loop(
+        args, logger, model, opt, sched, train_loader, val_loader,
+        train_set, train_gen, val_gen, identity, run_id,
+        start_epoch=start_epoch, global_step=global_step,
+        best_psnr=best_psnr, best_epoch=best_epoch)
 
 
 if __name__ == '__main__':

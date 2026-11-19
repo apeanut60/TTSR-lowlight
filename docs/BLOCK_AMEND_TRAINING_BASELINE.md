@@ -1,101 +1,104 @@
 # Block-amend training baseline
 
 Engineering baseline for the CSFI-U-Net Stage-A port on LOLv2-Real with
-**generated Nano references**. This is a reproducible starting point, not a
-claim of optimal hyperparameters or PSNR vs old P2.
+**generated Nano references**. Reproducible start point — not a performance claim.
 
-## What changed (this fix)
+**Checkpoint schema:** `checkpoint_schema_version = 2` (amend-2).  
+Schema-1 / incomplete packs are **rejected** on resume (no warm-start fallback).
 
-| Area | Change |
+## What is implemented
+
+| Area | Behavior |
 |---|---|
-| Init | `fresh` / `lte_only` / strict `inference`/`resume` via `model/weight_init.py`. No silent shape-filtered MainNet load from old P2. |
-| Data | `dataset/block_amend_lolv2.py`: ID-mapped triplets, no GT-as-Ref, paired crop/flip/rot, train/val manifests. |
-| Tiled infer | Shared `model/tiled_infer.py`; trainer + `v2_p2_runtime` use it. **No** `apply_p2_cfg` / `apply_csfi_cfg` during inference. |
-| No-ref | `TTSREnhance` accepts `ref=refsr=None` (skips RefCorrection / ST / inject). |
-| Train entry | `block_amend_main.py` (no Official Test / extra_test during train). |
-| Metrics | Protocol `rgb_float_clipped_v1` in `utils_metrics_block_amend.py`. |
-| Scheduler | Epoch-level `scheduler.step()` **after** optimizer updates. |
-| Checkpoints | Atomic `checkpoint_last.pt` / `checkpoint_best_val_psnr.pt` packs. |
+| Init | `fresh` / `lte_only` (LTE.* only) / strict pack load for resume & eval |
+| Data | ID-mapped Low/GT/Nano; no GT-as-Ref; paired crop/flip/rot |
+| Epoch aug | `set_epoch(epoch)`; seed = SHA256(base_seed\|epoch\|sample_id); `persistent_workers=False` |
+| Manifest | Identity hash **v2** over relative paths + `ref_subdir` (not basename-only; not content hash) |
+| Tiled infer | Shared `model/tiled_infer.py`; no silent `apply_*_cfg` |
+| Metrics | `rgb_float_clipped_v1` |
+| Scheduler | One `StepLR.step()` after each epoch’s optimizer updates |
+| Checkpoint | Atomic `tmp_ckpt_*.pt` → `os.replace`; validate → update best → save best (if improved) → save last |
+| Resume | Restores model/opt/sched/RNG/loader generators; locks split identity & config |
 
-## Unchanged model / loss
-
-- Architecture: TTSREnhance + LTE + SearchTransfer + CSFIUNet (H, H/2, H/4), IGAB×2, light-up base + RGB residual, optional RefCorrection.
-- Matching: SearchTransfer / `sigmoid(S)` as soft-attention modulation (not a calibrated reliability gate).
-- Loss recipe: L1 (`rec_w=1`) + MS-SSIM (`ms_ssim_w=1`); other losses off.
-- Train hyperparams: `batch=4`, `crop=160`, `lr=1e-4`, `epochs=100`, StepLR `50/0.5`, `seed=42`.
-
-## Fixed config (explicit)
+## Fixed training recipe (unchanged this round)
 
 ```
-backbone=csfi_unet
-num_res_blocks=8+8+4+2
-n_feats=64  res_scale=1.0
-igab_blocks=1,1  igab_heads=1
-enable_lightup=True
+backbone=csfi_unet  num_res_blocks=8+8+4+2  n_feats=64
+igab_blocks=1,1  enable_lightup=True
 use_global_illum=False  use_ref_illum=False
 ref_correction=True  freeze_lte=True  freeze_stages=""
 query_illum_align=False  texture_fusion=False
 stage_mode_lv*=normal
-eval_mean_align=False  eval_chroma_gain=1.0  eval_tta=False
-ref_degrade=False  (default off for this baseline)
+batch_size=4  train_crop_size=160  lr=1e-4
+num_epochs=100  StepLR(50, 0.5)
+rec_w=1  ms_ssim_w=1  other losses off
+seed=42  val_ratio=0.1  split_seed=42
+ref_degrade=False
 ```
 
-## Init modes
+## Checkpoint pack (schema 2)
 
-| Mode | Behavior |
-|---|---|
-| `fresh` (default) | Code init for MainNet (soft inject / zero Estimator readout) + ImageNet VGG LTE, frozen. |
-| `lte_only` | Load **only** `LTE.*` from `--init_checkpoint`. MainNet/RefCorrection must be byte-identical; missing/mismatch LTE keys error. |
-| `resume` | Full training pack (`model_state_dict` + optimizer + scheduler + epoch). |
-| `eval` / inference | Strict weight load; architecture mismatch errors out. |
+Required fields: `checkpoint_schema_version`, `model_state_dict`,
+`optimizer_state_dict`, `scheduler_state_dict`, `epoch`, `global_step`,
+`best_val_psnr`, `best_epoch`, `validation_completed`, `config` (full resolved),
+`metric_protocol`, `init_scope`, `run_id`, `split_identity`, `rng`
+(python / numpy / torch CPU / CUDA / train&val generators).
 
-## Data
+**Save order each epoch:** train → `scheduler.step()` → optional val →
+update best if **strictly** better → build pack → save best (if this epoch) →
+save last. `last.best_val_psnr` is the true historical best after that epoch.
 
-- Train refs: `Train/nanobanana_ref_v2` (override `--train_ref_subdir`).
-- Official Test refs: `Test/nanobanana_ref_v3` (eval only).
-- Missing Nano → error (or `--allow_partial_coverage` writes include/exclude manifests).
-- Internal val: `val_ratio=0.1`, `split_seed=42`, saved under `save_dir/splits/`.
-- Best ckpt selected on **internal val** `psnr_rgb` only. Official Test is a separate `--mode eval --eval_split test` command.
+**Resume:** checkpoint config wins; only explicit CLI ops overrides
+(`cpu`, `num_gpu`, `num_workers`, `num_epochs` extend, paths/logs). Locked
+architecture/loss/split/seed/crop/batch keys cannot be silently defaulted over.
+Missing split manifests or hash mismatch → hard fail (no re-split).
 
-## Metrics / checkpoints
+**Eval:** builds model from checkpoint `config` when present; bare weights
+require explicit architecture CLI (no silent defaults).
 
-- Protocol name: **`rgb_float_clipped_v1`** (float PSNR/SSIM on clipped [0,1]→[0,255] float; PNG is clip+round uint8).
-- Saves: `run_meta.json`, `checkpoint_last.pt`, `checkpoint_best_val_psnr.pt`, per-epoch `val_metrics_epXXXXX.json`.
+**Compatibility:** schema 2 only. Older incomplete checkpoints cannot resume
+equivalently; do not auto-convert.
 
-## Tests run
+## Manifest identity (v2)
 
-```bash
-conda activate ttsr
-python tests/test_block_amend_baseline.py
-# all block-amend baseline tests passed
+Hash input: sorted `{id, split, ref_subdir, low/normal/ref relative paths}`.  
+Same basenames under a different `ref_subdir` → different hash.  
+This is **not** a file-content fingerprint (optional `file_sha256` exists but is
+not recomputed every epoch).
+
+## Tests run (CPU, synthetic / stub)
+
+```text
+Python 3.10.20  PyTorch 1.12.1+cu113
+python tests/test_block_amend_round2.py
+→ all block-amend round2 tests passed
 ```
 
-Covered: LTE-only isolation, no cfg rewrite, tiled stitch (square/short/transpose/odd/small), single-tile≡direct, no-ref, missing-ref error, paired aug, GT≠Ref input, tiny train step + frozen LTE, PNG no wrap, ckpt/scheduler restore, fresh rejects non-empty dir, unknown stage_mode.
+Covered: atomic save create/replace/failure-safe; epoch-aware paired aug;
+manifest overlap/dup/batch/ref_subdir hash; grad NaN blocks step; last/best
+20→21→20.5 sequence; resume rejects missing split; mini train+resume
+scheduler/epoch; val_every metadata; tampered manifest; plus LTE-only / no-ref /
+PNG / tiled regressions.
 
-**Not run:** full-dataset training, Official Test eval, real VGG end-to-end (LTE stubbed in unit tests). Requires local LOLv2 + Nano trees and `TORCH_HOME` VGG cache for real runs.
+**Stub:** `_StubLTE` replaces VGG LTE (no download).  
+**Not verified here:** full LOLv2 training, Official Test, real ImageNet VGG
+bitwise continuity across machines/PyTorch versions, mid-epoch resume.
 
-## Commands (do not execute here as formal runs)
+## Commands (do not execute as formal runs here)
 
-### 1. Preflight (no train)
-
+### Preflight
 ```bash
-cd /root/projects/TTSR-lowlight-v1-data1SOTA
-conda activate ttsr
+cd /root/projects/TTSR-lowlight-v1-data1SOTA && conda activate ttsr
 export TORCH_HOME=/root/data/cache/torch
-python block_amend_main.py \
-  --mode preflight \
+python block_amend_main.py --mode preflight \
   --dataset_dir /root/data/datasets/lol-v2-real \
   --save_dir /root/data/experiments/TTSR-lowlight-block-amend/preflight_check \
-  --train_ref_subdir nanobanana_ref_v2 \
-  --test_ref_subdir nanobanana_ref_v3 \
   --init_scope fresh
 ```
 
-### 2. Fresh training
-
+### Fresh train
 ```bash
-RUN_NAME=csfi_lolv2_fresh_$(date +%Y%m%d_%H%M%S) \
-  bash train/train_block_amend_csfi_lolv2.sh
+bash train/train_block_amend_csfi_lolv2.sh
 # or:
 python block_amend_main.py --mode train \
   --dataset_dir /root/data/datasets/lol-v2-real \
@@ -103,29 +106,20 @@ python block_amend_main.py --mode train \
   --init_scope fresh
 ```
 
-Optional LTE-only:
-
-```bash
-INIT_SCOPE=lte_only INIT_CHECKPOINT=/path/to/weights.pt \
-  RUN_NAME=csfi_lolv2_lte_only bash train/train_block_amend_csfi_lolv2.sh
-```
-
-### 3. Resume
-
+### Resume
 ```bash
 python block_amend_main.py --mode resume \
   --dataset_dir /root/data/datasets/lol-v2-real \
   --save_dir /root/data/experiments/TTSR-lowlight-block-amend/<RUN> \
-  --resume_checkpoint /root/data/experiments/TTSR-lowlight-block-amend/<RUN>/checkpoint_last.pt \
-  --split_dir /root/data/experiments/TTSR-lowlight-block-amend/<RUN>/splits
+  --resume_checkpoint .../<RUN>/checkpoint_last.pt \
+  --split_dir .../<RUN>/splits
 ```
 
-### 4. Final Official Test / export
-
+### Official Test / export
 ```bash
 python block_amend_main.py --mode eval --eval_split test --save_images \
   --dataset_dir /root/data/datasets/lol-v2-real \
   --test_ref_subdir nanobanana_ref_v3 \
-  --save_dir /root/data/experiments/TTSR-lowlight-block-amend/<RUN>/official_test \
-  --model_path /root/data/experiments/TTSR-lowlight-block-amend/<RUN>/checkpoint_best_val_psnr.pt
+  --save_dir .../<RUN>/official_test \
+  --model_path .../<RUN>/checkpoint_best_val_psnr.pt
 ```

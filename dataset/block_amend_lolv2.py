@@ -20,6 +20,24 @@ import torch
 
 
 IMG_EXTS = ('.png', '.jpg', '.jpeg', '.PNG', '.JPG', '.JPEG')
+MANIFEST_HASH_VERSION = 'v2'
+
+
+def stable_aug_seed(base_seed: int, epoch: int, sample_id: str) -> int:
+    """Stable integer seed from base_seed/epoch/sample_id (not Python hash())."""
+    payload = ('%s|%s|%s' % (int(base_seed), int(epoch), str(sample_id))).encode('utf-8')
+    digest = hashlib.sha256(payload).hexdigest()
+    return int(digest[:16], 16)
+
+
+def normalize_rel_path(path: str, dataset_dir: str) -> str:
+    path = os.path.normpath(path)
+    root = os.path.normpath(dataset_dir)
+    try:
+        rel = os.path.relpath(path, root)
+    except ValueError:
+        rel = path
+    return rel.replace('\\', '/')
 
 
 def _to_rgb_uint8(img: np.ndarray) -> np.ndarray:
@@ -110,7 +128,17 @@ def collect_triplets(
             missing_ref.append(rec)
             continue
         ok.append(dict(
-            id=sid, low=rec['low'], normal=rec['normal'], ref=rec['ref']))
+            id=sid,
+            low=rec['low'],
+            normal=rec['normal'],
+            ref=rec['ref'],
+            split=split,
+            ref_subdir=ref_subdir,
+            dataset_dir=os.path.normpath(dataset_dir),
+            low_rel=normalize_rel_path(rec['low'], dataset_dir),
+            normal_rel=normalize_rel_path(rec['normal'], dataset_dir),
+            ref_rel=normalize_rel_path(rec['ref'], dataset_dir),
+        ))
 
     if require_all and missing_ref:
         raise RuntimeError(
@@ -137,13 +165,122 @@ def file_sha256(path: str, chunk=1 << 20) -> str:
     return h.hexdigest()
 
 
-def manifest_hash(items: Sequence[Dict]) -> str:
+def manifest_identity_hash(
+    items: Sequence[Dict],
+    dataset_dir: str,
+    split_name: str,
+    ref_subdir: str,
+) -> str:
+    """Identity hash over sorted relative paths + ref_subdir (not file contents).
+
+    Format version: ``MANIFEST_HASH_VERSION``. Changing ref_subdir with the same
+    basenames yields a different hash. This is **not** a content fingerprint.
+    """
+    rows = []
+    for x in sorted(items, key=lambda z: str(z['id'])):
+        low = x.get('low_rel') or normalize_rel_path(x['low'], dataset_dir)
+        normal = x.get('normal_rel') or normalize_rel_path(x['normal'], dataset_dir)
+        ref = x.get('ref_rel') or normalize_rel_path(x['ref'], dataset_dir)
+        rows.append({
+            'id': x['id'],
+            'split': split_name,
+            'ref_subdir': ref_subdir,
+            'low': low,
+            'normal': normal,
+            'ref': ref,
+        })
     payload = json.dumps(
-        [{'id': x['id'], 'low': os.path.basename(x['low']),
-          'normal': os.path.basename(x['normal']),
-          'ref': os.path.basename(x['ref'])} for x in items],
+        {'version': MANIFEST_HASH_VERSION, 'items': rows},
         sort_keys=True, separators=(',', ':'))
     return hashlib.sha256(payload.encode('utf-8')).hexdigest()
+
+
+def manifest_hash(items: Sequence[Dict], dataset_dir: str = '',
+                  split_name: str = '', ref_subdir: str = '') -> str:
+    """Backward-compatible wrapper; prefers identity hash when context given."""
+    if dataset_dir and (split_name or ref_subdir or items):
+        # Infer split/ref from items when possible
+        sn = split_name or (items[0].get('split') if items else '')
+        rs = ref_subdir or (items[0].get('ref_subdir') if items else '')
+        dd = dataset_dir or (items[0].get('dataset_dir') if items else '')
+        return manifest_identity_hash(items, dd, sn, rs)
+    # Legacy basename-only (discouraged); still version-tagged
+    payload = json.dumps(
+        {'version': 'v1_basename',
+         'items': [{'id': x['id'],
+                    'low': os.path.basename(x['low']),
+                    'normal': os.path.basename(x['normal']),
+                    'ref': os.path.basename(x['ref'])} for x in items]},
+        sort_keys=True, separators=(',', ':'))
+    return hashlib.sha256(payload.encode('utf-8')).hexdigest()
+
+
+def validate_split_manifests(
+    train_items: List[Dict],
+    val_items: List[Dict],
+    dataset_dir: str,
+    ref_subdir: str,
+    batch_size: int,
+    drop_last: bool = True,
+) -> Dict:
+    """Shared validation for create/load/resume/eval. Raises on failure."""
+    if not train_items:
+        raise RuntimeError('train manifest is empty')
+    if not val_items:
+        raise RuntimeError('val manifest is empty')
+
+    def _check_unique(items, name):
+        ids = [x['id'] for x in items]
+        if len(ids) != len(set(ids)):
+            from collections import Counter
+            dup = [i for i, c in Counter(ids).items() if c > 1]
+            raise RuntimeError('%s has duplicate ids: %s' % (name, dup[:10]))
+        return set(ids)
+
+    train_ids = _check_unique(train_items, 'train')
+    val_ids = _check_unique(val_items, 'val')
+    overlap = train_ids & val_ids
+    if overlap:
+        raise RuntimeError(
+            'train/val id overlap: %s' % sorted(overlap)[:10])
+
+    # Path existence + unexpected path reuse across splits
+    path_owner = {}
+    for split_name, items in (('train', train_items), ('val', val_items)):
+        for it in items:
+            for key in ('low', 'normal', 'ref'):
+                p = os.path.normpath(it[key])
+                if not os.path.isfile(p):
+                    raise FileNotFoundError(
+                        '%s missing %s for id=%s path=%s'
+                        % (split_name, key, it['id'], p))
+                # low paths uniquely owned; ref/normal may theoretically alias
+                # across cameras but for our LOLv2 layout must not cross splits
+                if key == 'low':
+                    if p in path_owner and path_owner[p] != split_name:
+                        raise RuntimeError(
+                            'Low path reused across splits: %s (%s vs %s)'
+                            % (p, path_owner[p], split_name))
+                    path_owner[p] = split_name
+
+    if drop_last and len(train_items) < int(batch_size):
+        raise RuntimeError(
+            'train size %d < batch_size %d with drop_last=True would yield '
+            'zero optimizer updates' % (len(train_items), batch_size))
+
+    train_hash = manifest_identity_hash(
+        train_items, dataset_dir, 'train', ref_subdir)
+    val_hash = manifest_identity_hash(
+        val_items, dataset_dir, 'val', ref_subdir)
+    return {
+        'train_count': len(train_items),
+        'val_count': len(val_items),
+        'train_hash': train_hash,
+        'val_hash': val_hash,
+        'manifest_hash_version': MANIFEST_HASH_VERSION,
+        'ref_subdir': ref_subdir,
+        'dataset_dir': os.path.normpath(dataset_dir),
+    }
 
 
 def write_coverage_manifests(
@@ -177,7 +314,9 @@ def write_coverage_manifests(
         'exclude_missing_ref': len(missing),
         'include_manifest': include_path,
         'exclude_manifest': exclude_path,
-        'include_hash': manifest_hash(ok),
+        'include_hash': manifest_identity_hash(
+            ok, dataset_dir, 'train_include', ref_subdir),
+        'manifest_hash_version': MANIFEST_HASH_VERSION,
     }
     with open(os.path.join(out_dir, 'coverage_report.json'), 'w') as f:
         json.dump(report, f, indent=2)
@@ -221,22 +360,41 @@ def split_train_val(
     return train, val
 
 
-def save_split_manifests(train_items, val_items, out_dir: str) -> Dict:
+def save_split_manifests(
+    train_items, val_items, out_dir: str,
+    dataset_dir: str = '', ref_subdir: str = '',
+    batch_size: int = 1,
+) -> Dict:
     os.makedirs(out_dir, exist_ok=True)
+    if not dataset_dir and train_items:
+        dataset_dir = train_items[0].get('dataset_dir', '')
+    if not ref_subdir and train_items:
+        ref_subdir = train_items[0].get('ref_subdir', '')
+    meta = validate_split_manifests(
+        train_items, val_items, dataset_dir, ref_subdir,
+        batch_size=batch_size, drop_last=True)
+    meta['train_ids'] = [x['id'] for x in train_items]
+    meta['val_ids'] = [x['id'] for x in val_items]
     train_path = os.path.join(out_dir, 'split_train.json')
     val_path = os.path.join(out_dir, 'split_val.json')
-    meta = {
-        'train_count': len(train_items),
-        'val_count': len(val_items),
-        'train_hash': manifest_hash(train_items),
-        'val_hash': manifest_hash(val_items),
-        'train_ids': [x['id'] for x in train_items],
-        'val_ids': [x['id'] for x in val_items],
-    }
     with open(train_path, 'w') as f:
-        json.dump({'items': train_items, 'hash': meta['train_hash']}, f, indent=2)
+        json.dump({
+            'items': train_items,
+            'hash': meta['train_hash'],
+            'manifest_hash_version': MANIFEST_HASH_VERSION,
+            'split': 'train',
+            'ref_subdir': ref_subdir,
+            'dataset_dir': os.path.normpath(dataset_dir),
+        }, f, indent=2)
     with open(val_path, 'w') as f:
-        json.dump({'items': val_items, 'hash': meta['val_hash']}, f, indent=2)
+        json.dump({
+            'items': val_items,
+            'hash': meta['val_hash'],
+            'manifest_hash_version': MANIFEST_HASH_VERSION,
+            'split': 'val',
+            'ref_subdir': ref_subdir,
+            'dataset_dir': os.path.normpath(dataset_dir),
+        }, f, indent=2)
     with open(os.path.join(out_dir, 'split_meta.json'), 'w') as f:
         json.dump(meta, f, indent=2)
     return meta
@@ -302,7 +460,12 @@ def _to_norm(img: np.ndarray) -> np.ndarray:
 
 
 class BlockAmendTrainSet(Dataset):
-    """Generated-ref training set with paired geometry. No GT-as-Ref."""
+    """Generated-ref training set with paired geometry. No GT-as-Ref.
+
+    Call ``set_epoch(epoch)`` before each training epoch (and before creating
+    the DataLoader iterator). Augmentation RNG depends on
+    ``(base_seed, epoch, sample_id)`` via ``stable_aug_seed`` — not on GT pixels.
+    """
 
     def __init__(self, items: List[Dict], crop_size: int = 160,
                  ref_degrade: bool = False, seed: int = 42):
@@ -312,11 +475,15 @@ class BlockAmendTrainSet(Dataset):
         self.crop_size = int(crop_size)
         self.ref_degrade = bool(ref_degrade)
         self.seed = int(seed)
+        self.epoch = 0
         if self.ref_degrade:
             from dataset.data1 import DegradeRef
             self.degrader = DegradeRef()
         else:
             self.degrader = None
+
+    def set_epoch(self, epoch: int):
+        self.epoch = int(epoch)
 
     def __len__(self):
         return len(self.items)
@@ -343,14 +510,14 @@ class BlockAmendTrainSet(Dataset):
         if Ref.shape[:2] != (h, w):
             Ref = cv2.resize(Ref, (w, h), interpolation=cv2.INTER_LINEAR)
 
-        rng = random.Random(self.seed + int(idx) * 10007)
-        # Use numpy RNG seeded from python rng for crop; keep deterministic-ish
-        # per index while still varying across epochs if caller re-seeds.
+        # Seed from base_seed + epoch + stable sample_id (never GT content).
+        rng = random.Random(stable_aug_seed(self.seed, self.epoch, rec['id']))
         LR, HR, Ref = _paired_pad_crop(LR, HR, Ref, self.crop_size, rng)
         LR, HR, Ref = _paired_flip_rot(LR, HR, Ref, rng)
 
         if self.degrader is not None:
-            Ref = self.degrader(Ref)
+            # DegradeRef uses its own RNG; seed from the same stream for pairing.
+            Ref = self.degrader(Ref, seed=rng.randint(0, 2 ** 31 - 1))
 
         LR_sr, Ref_sr = LR.copy(), Ref.copy()
         sample = {
