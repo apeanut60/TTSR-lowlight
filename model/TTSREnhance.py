@@ -155,14 +155,57 @@ class TTSREnhance(nn.Module):
             if refsr is not None:
                 refsr, _ = _pad_to_multiple(refsr, 4)
 
+        # Explicit no-reference mode: both ref and refsr must be None.
+        # Half-specified reference inputs are rejected.
+        if (ref is None) ^ (refsr is None):
+            raise ValueError(
+                'ref and refsr must both be set or both be None; got ref=%s refsr=%s'
+                % (type(ref).__name__, type(refsr).__name__))
+        no_ref = ref is None and refsr is None
+
+        self.last_query_illum_info = None
+        self.last_match_diag = None
+        self.last_texture_fusion_info = None
+
+        if no_ref:
+            # Skip RefCorrection / reference LTE / SearchTransfer / inject.
+            S = T_lv3 = T_lv2 = T_lv1 = None
+            ref_input = None
+            main_kwargs = dict(
+                apply_illum=apply_illum, ref=None,
+                apply_ref_illum=False,
+                gate_mode=gate_mode, gate_shift=gate_shift,
+                gate_smooth_kernel=gate_smooth_kernel,
+                collect_gate_stats=collect_gate_stats,
+                disable_T_lv3=True, disable_T_lv2=True, disable_T_lv1=True,
+                stage_mode_lv3='branch_bypass',
+                stage_mode_lv2='branch_bypass',
+                stage_mode_lv1='branch_bypass',
+                collect_residual_decomp=collect_residual_decomp,
+                use_reference=False)
+            if use_csfi and stem is not None:
+                main_kwargs['stem'] = stem
+            sr = self.MainNet(lr, S, T_lv3, T_lv2, T_lv1, **main_kwargs)
+            if use_csfi and orig_hw is not None:
+                sr = sr[..., :orig_hw[0], :orig_hw[1]]
+            if return_ref:
+                out = (sr, S, T_lv3, T_lv2, T_lv1, None)
+            else:
+                out = (sr, S, T_lv3, T_lv2, T_lv1)
+            if return_diag:
+                return out + (None, None)
+            return out
+
         # Extract VGG features for search and texture transfer
         # lrsr/refsr are raw images at the same resolution (no bicubic needed)
+        # Do NOT wrap LTE in torch.no_grad() — RefCorrection must receive grads
+        # through the frozen LTE graph when it is trainable.
         if self.RefCorrection is not None:
             ref_input = self.RefCorrection(ref)
             refsr_input = self.RefCorrection(refsr)
         else:
-            ref_input = ref.detach()
-            refsr_input = refsr.detach()
+            ref_input = ref
+            refsr_input = refsr
 
         # Optional: brightness-align Low Query toward Nano Ref before LTE.
         # MainNet still receives the original `lr`. Value path uses `ref_input`.
@@ -176,9 +219,6 @@ class TTSREnhance(nn.Module):
         fusion_lambda = float(getattr(self.args, 'texture_fusion_lambda', 0.0))
         fusion_s_source = str(
             getattr(self.args, 'texture_fusion_s_source', 'a0')).lower()
-        self.last_query_illum_info = None
-        self.last_match_diag = None
-        self.last_texture_fusion_info = None
 
         def _aligned_query():
             if use_qia and (alpha > 0.0 or beta > 0.0):

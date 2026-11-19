@@ -66,10 +66,20 @@ if __name__ == '__main__':
     if is_enhance:
         _model = TTSREnhance.TTSREnhance(args).to(device)
         _logger.info('Using TTSREnhance model (1:1 low-light enhancement mode)')
-        # Optionally load pre-trained TTSR weights for transfer learning
-        if args.load_pretrain and args.pretrain_path:
+        # Prefer explicit init_scope (block-amend). Legacy load_pretrain remains
+        # but never use require_core=False to silently paint MainNet from P2.
+        _init_scope = str(getattr(args, 'init_scope', 'fresh') or 'fresh').lower()
+        if _init_scope not in ('fresh', 'none', ''):
+            from model.weight_init import apply_init_mode
+            apply_init_mode(_model, args, device=device, logger=_logger)
+        elif args.load_pretrain and args.pretrain_path:
             _logger.info('Loading pre-trained weights from: ' + args.pretrain_path)
             _require_core = getattr(args, 'pretrain_require_core', True)
+            if not _require_core:
+                raise SystemExit(
+                    'Refusing load_pretrain with pretrain_require_core=False '
+                    '(can overwrite CSFI soft-init). Use --init_scope lte_only '
+                    '--init_checkpoint PATH, or require_core=True.')
             _model = TTSREnhance.load_pretrained_weights(
                 _model, args.pretrain_path, device,
                 require_core=_require_core)

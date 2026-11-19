@@ -133,17 +133,29 @@ def parse_num_res_blocks(spec) -> list:
     return blocks
 
 
+_ALLOWED_STAGE_MODES = frozenset({
+    'normal', 'branch_bypass', 'texture_zero',
+})
+
+
 def _normalize_stage_mode(mode):
     if mode is None:
         return 'normal'
     m = str(mode).strip().lower()
+    if m in ('', 'none', 'default'):
+        return 'normal'
     aliases = {
         'bypass': 'branch_bypass',
         'zero': 'texture_zero',
         'zero_texture': 'texture_zero',
         'no_inject': 'branch_bypass',
     }
-    return aliases.get(m, m)
+    m = aliases.get(m, m)
+    if m not in _ALLOWED_STAGE_MODES:
+        raise ValueError(
+            'Unsupported stage_mode %r (allowed: %s)'
+            % (mode, ', '.join(sorted(_ALLOWED_STAGE_MODES))))
+    return m
 
 
 class CSFIUNet(nn.Module):

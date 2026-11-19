@@ -89,15 +89,21 @@ parser.add_argument('--use_global_illum', type=str2bool, default=False,
 parser.add_argument('--use_ref_illum', type=str2bool, default=False,
                     help='CSFI-U-Net: enable RefIllumTransfer (Stage-A default off)')
 parser.add_argument('--load_pretrain', type=str2bool, default=False,
-                    help='Load pre-trained TTSR weights for transfer learning')
+                    help='Load pre-trained TTSR weights for transfer learning '
+                         '(legacy; prefer --init_scope for block-amend)')
 parser.add_argument('--pretrain_path', type=str, default='/root/data/pretrain_models/TTSR-rec.pt',
                     help='Path to pre-trained TTSR weights')
 parser.add_argument('--pretrain_require_core', type=str2bool, default=True,
                     help='If True, fail when core MainNet/LTE tensors are missing from pretrain')
+parser.add_argument('--init_scope', type=str, default='fresh',
+                    help='Weight init mode: fresh|lte_only|inference (block-amend)')
+parser.add_argument('--init_checkpoint', type=str, default='',
+                    help='Checkpoint path for init_scope=lte_only|inference')
 parser.add_argument('--freeze_lte', type=str2bool, default=False,
                     help='Freeze LTE (VGG) weights during training')
 parser.add_argument('--freeze_stages', type=str, default='sfe,stage1,stage2',
-                    help='Comma-separated MainNet stages to freeze: sfe,stage1,stage2,stage3,merge')
+                    help='Comma-separated MainNet stages to freeze: sfe,stage1,stage2,stage3,merge. '
+                         'Block-amend baseline scripts must pass empty string.')
 parser.add_argument('--ref_correction', type=str2bool, default=True,
                     help='Add an always-on lightweight reference correction head before LTE')
 parser.add_argument('--ref_correction_feats', type=int, default=16,

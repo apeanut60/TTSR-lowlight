@@ -131,6 +131,10 @@ def load_frozen_p2(device='cuda'):
 
 
 def apply_p2_cfg(model):
+    """Apply historical P2 knobs. Call only when explicitly rebuilding a P2 experiment.
+
+    Must **not** be invoked from generic tiled / trainer inference paths.
+    """
     for k, v in P2_CONFIG.items():
         if k in ('tile_size', 'tile_overlap', 'ref_degrade'):
             continue
@@ -142,6 +146,7 @@ def apply_p2_cfg(model):
 
 
 def apply_csfi_cfg(model):
+    """Apply CSFI_CONFIG. Explicit historical/helper use only — not during inference."""
     for k, v in CSFI_CONFIG.items():
         if k in ('tile_size', 'tile_overlap', 'ref_degrade'):
             continue
@@ -215,93 +220,39 @@ def tile_blend_weight(y0, y1, x0, x1, height, width, overlap, device, dtype):
 
 
 def forward_p2_tiled_backbone(model, args, lr, lrsr, ref, refsr, enable_grad=False):
-    """Tiled P2 backbone. No RefIllumTransfer and no GlobalIllumHead.
+    """Tiled backbone. No RefIllumTransfer and no GlobalIllumHead.
 
-    Query gamma/LUT are computed once on the full image. Backbone gradients
-    are off unless ``enable_grad`` is set. The returned tensor is float32 in
-    the model's native ``[-1, 1]`` range.
-
-    When ``model.MainNet`` is CSFIUNet, pads to a multiple of 4, runs
-    IlluminationEstimator / light-up once on the full padded Low, and injects
-    cropped stem features into each tile (avoids light-up seams).
+    Does **not** call ``apply_p2_cfg`` / ``apply_csfi_cfg`` (no silent config
+    rewrite). Uses the shared ``model.tiled_infer.tiled_forward`` path.
+    Photometric heads are left off here; callers apply them explicitly.
     """
-    if isinstance(getattr(model, 'MainNet', None), CSFIUNet):
-        apply_csfi_cfg(model)
-    else:
-        apply_p2_cfg(model)
-    tile = int(args.tile_size)
-    overlap = max(0, min(int(args.tile_overlap), max(tile // 2, 0)))
-    ctx = torch.enable_grad() if enable_grad else torch.no_grad()
-    with ctx:
-        use_csfi = isinstance(getattr(model, 'MainNet', None), CSFIUNet)
-        orig_hw = lr.shape[-2:]
-        stem_full = None
-        if use_csfi:
-            lr, _ = _pad_to_multiple(lr, 4)
-            lrsr, _ = _pad_to_multiple(lrsr, 4)
-            if ref is not None:
-                ref, _ = _pad_to_multiple(ref, 4)
-            if refsr is not None:
-                refsr, _ = _pad_to_multiple(refsr, 4)
-            # Align tile origins to multiples of 4 so H/2 and H/4 crops are exact.
-            tile = int(math.ceil(tile / 4.0) * 4)
-            overlap = int(math.floor(overlap / 4.0) * 4)
-            stem_full = model.MainNet.encode_low_stem(lr)
+    from model.tiled_infer import tiled_forward
 
-        if ref is None:
-            g, lut = None, None
-        else:
-            g, lut, _ = estimate_query_align_maps(
-                lrsr, ref, alpha=args.query_illum_alpha,
-                gamma_min=args.query_gamma_min, gamma_max=args.query_gamma_max,
-                bins=args.query_hist_bins)
-        fwd = dict(
-            query_gamma_override=g, query_hist_lut_override=lut,
-            stage_mode_lv3=args.stage_mode_lv3,
-            stage_mode_lv2=args.stage_mode_lv2,
-            stage_mode_lv1=args.stage_mode_lv1,
-        )
-        _, _, height, width = lr.shape
+    fwd = {}
+    # Only estimate query maps when the *current* args already enable it.
+    if (ref is not None and bool(getattr(args, 'query_illum_align', False))
+            and float(getattr(args, 'query_illum_alpha', 0.0)) > 0.0):
+        g, lut, _ = estimate_query_align_maps(
+            lrsr, ref, alpha=args.query_illum_alpha,
+            gamma_min=args.query_gamma_min, gamma_max=args.query_gamma_max,
+            bins=args.query_hist_bins)
+        fwd['query_gamma_override'] = g
+        if float(getattr(args, 'query_hist_beta', 0.0)) > 0.0:
+            fwd['query_hist_lut_override'] = lut
+    # Honour existing stage_mode on args without rewriting them.
+    for k in ('stage_mode_lv3', 'stage_mode_lv2', 'stage_mode_lv1'):
+        if getattr(args, k, None) is not None:
+            fwd[k] = getattr(args, k)
 
-        def one(y0, y1, x0, x1):
-            kw = dict(fwd)
-            if stem_full is not None:
-                kw['stem'] = CSFIUNet.crop_stem(stem_full, y0, y1, x0, x1)
-            return model(
-                lr=lr[:, :, y0:y1, x0:x1],
-                lrsr=lrsr[:, :, y0:y1, x0:x1],
-                ref=None if ref is None else ref[:, :, y0:y1, x0:x1],
-                refsr=None if refsr is None else refsr[:, :, y0:y1, x0:x1],
-                apply_illum=False, apply_ref_illum=False, **kw)[0]
-
-        # With /4-padded canvas and tile/overlap multiples of 4, spans stay
-        # aligned so H/2 and H/4 stem crops are exact.
-        spans_y = tile_spans(height, tile, overlap)
-        spans_x = tile_spans(width, tile, overlap)
-
-        if len(spans_y) == 1 and len(spans_x) == 1:
-            y0, y1 = spans_y[0]
-            x0, x1 = spans_x[0]
-            sr = one(y0, y1, x0, x1)
-        else:
-            acc = torch.zeros(1, 3, height, width, device=lr.device, dtype=lr.dtype)
-            wt = torch.zeros(1, 1, height, width, device=lr.device, dtype=lr.dtype)
-            for y0, y1 in spans_y:
-                for x0, x1 in spans_x:
-                    pred = one(y0, y1, x0, x1)
-                    weight = tile_blend_weight(
-                        y0, y1, x0, x1, height, width, overlap,
-                        lr.device, lr.dtype)
-                    acc[:, :, y0:y1, x0:x1] = acc[:, :, y0:y1, x0:x1] + pred * weight
-                    wt[:, :, y0:y1, x0:x1] = wt[:, :, y0:y1, x0:x1] + weight
-            if int((wt <= 0).sum()) != 0:
-                raise RuntimeError('tiled backbone left pixels with weight <= 0')
-            sr = acc / wt
-        if use_csfi:
-            sr = sr[..., :orig_hw[0], :orig_hw[1]]
-        if not torch.isfinite(sr).all():
-            raise RuntimeError('tiled backbone produced a non-finite value')
-    return sr
+    return tiled_forward(
+        model, lr, lrsr, ref, refsr,
+        tile_size=int(getattr(args, 'tile_size', 256)),
+        overlap=int(getattr(args, 'tile_overlap', 96)),
+        enable_grad=enable_grad,
+        apply_illum=False,
+        apply_ref_illum=False,
+        fwd_extra=fwd,
+    )
 
 
 def apply_p2_photometric_postprocess(model, sr, low, ref):

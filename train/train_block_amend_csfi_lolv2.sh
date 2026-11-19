@@ -1,21 +1,25 @@
 #!/bin/bash
-# block-amend: train CSFI-U-Net Stage-A on LOLv2-Real from scratch (new blocks).
-# LTE may warm-start from Huawei v1r3; MainNetEnhance weights are NOT transferable.
-# Uses a dedicated save_dir — do not overwrite P2 / L1@100 experiment trees.
+# block-amend CSFI-U-Net Stage-A baseline on LOLv2-Real (generated Nano refs).
+# Default: fresh init (code MainNet + ImageNet LTE, frozen). No silent P2 load.
+# No --reset. Non-empty save_dir is rejected by block_amend_main.py.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-SAVE_DIR="${SAVE_DIR:-/root/data/experiments/TTSR-lowlight-block-amend/csfi_lolv2_scratch}"
-# Optional: LTE (+ RefCorrection if shapes match) from old P2 init
-PRETRAIN="${PRETRAIN:-/root/data/experiments/retry/TTSR-lowlight-v1r3-nano-Huawei/model/model_00004.pt}"
 DATA="${DATA:-/root/data/datasets/lol-v2-real}"
-NANO_EVAL="${NANO_EVAL:-/root/data/datasets/lol-v2-real/Test/nanobanana_ref_v3}"
+RUN_NAME="${RUN_NAME:-csfi_lolv2_$(date +%Y%m%d_%H%M%S)}"
+SAVE_ROOT="${SAVE_ROOT:-/root/data/experiments/TTSR-lowlight-block-amend}"
+SAVE_DIR="${SAVE_DIR:-$SAVE_ROOT/$RUN_NAME}"
+TRAIN_REF="${TRAIN_REF:-nanobanana_ref_v2}"
+TEST_REF="${TEST_REF:-nanobanana_ref_v3}"
+# Optional LTE-only warm-start (explicit). Leave empty for pure fresh.
+INIT_SCOPE="${INIT_SCOPE:-fresh}"
+INIT_CHECKPOINT="${INIT_CHECKPOINT:-}"
 
-mkdir -p "$SAVE_DIR"
 echo "============================================"
-echo " block-amend CSFI Stage-A  LOLv2-Real"
+echo " block-amend CSFI Stage-A baseline"
+echo " mode=train  init_scope=$INIT_SCOPE"
 echo " backbone=csfi_unet  num_res_blocks=8+8+4+2"
-echo " LTE warm-start (require_core=False): $PRETRAIN"
+echo " data=$DATA  train_ref=$TRAIN_REF"
 echo " save_dir=$SAVE_DIR"
 echo " code=$ROOT"
 echo "============================================"
@@ -23,77 +27,38 @@ echo "============================================"
 source /root/miniconda3/etc/profile.d/conda.sh 2>/dev/null || true
 conda activate ttsr 2>/dev/null || true
 cd "$ROOT"
-export TORCH_HOME=/root/data/cache/torch
+export TORCH_HOME="${TORCH_HOME:-/root/data/cache/torch}"
 export PYTHONUNBUFFERED=1
 
-PRETRAIN_ARGS=()
-if [[ -f "$PRETRAIN" ]]; then
-  PRETRAIN_ARGS=(
-    --load_pretrain True
-    --pretrain_path "$PRETRAIN"
-    --pretrain_require_core False
-    --freeze_lte True
-  )
-else
-  echo "WARN: pretrain missing ($PRETRAIN); training LTE from ImageNet VGG init"
-  PRETRAIN_ARGS=(--load_pretrain False --freeze_lte False)
+INIT_ARGS=(--init_scope "$INIT_SCOPE")
+if [[ "$INIT_SCOPE" == "lte_only" ]]; then
+  if [[ -z "$INIT_CHECKPOINT" || ! -f "$INIT_CHECKPOINT" ]]; then
+    echo "ERROR: INIT_SCOPE=lte_only requires existing INIT_CHECKPOINT" >&2
+    exit 1
+  fi
+  INIT_ARGS+=(--init_checkpoint "$INIT_CHECKPOINT")
+elif [[ -n "$INIT_CHECKPOINT" ]]; then
+  echo "ERROR: fresh init must not set INIT_CHECKPOINT ($INIT_CHECKPOINT)" >&2
+  exit 1
 fi
 
-python main.py \
-    --dataset lolv2real \
+python block_amend_main.py \
+    --mode train \
     --dataset_dir "$DATA" \
+    --train_ref_subdir "$TRAIN_REF" \
+    --test_ref_subdir "$TEST_REF" \
     --save_dir "$SAVE_DIR" \
-    --reset True \
-    --log_file_name "train_block_amend_csfi_lolv2.log" \
-    --enhance_mode True \
-    --backbone csfi_unet \
-    --num_res_blocks 8+8+4+2 \
-    --n_feats 64 \
-    --res_scale 1.0 \
-    --igab_blocks 1,1 \
-    --igab_heads 1 \
-    --enable_lightup True \
-    --use_global_illum False \
-    --use_ref_illum False \
     --batch_size 4 \
     --train_crop_size 160 \
-    --num_init_epochs 0 \
+    --lr_rate 1e-4 \
     --num_epochs 100 \
-    --print_every 10 \
-    --save_every 1 \
-    --val_every 1 \
     --decay 50 \
     --gamma 0.5 \
-    --lr_rate 1e-4 \
-    --lr_rate_lte 1e-6 \
-    --rec_w 1.0 \
-    --rec_loss_type l1 \
-    --ms_ssim_w 1.0 \
-    --per_w 0.0 \
-    --tpl_w 0.0 \
-    --adv_w 0.0 \
-    --illum_smooth_w 0.0 \
-    --color_w 0.0 \
-    --exposure_w 0.0 \
-    --ref_degrade True \
-    --ref_color_jitter 0.2 \
-    --ref_shift_range 4 \
-    --ref_blur_sigma 2.0 \
-    --eval_ref_degrade True \
-    --eval_mean_align False \
-    --eval_lolv2_nanobanana True \
-    --lolv2_nanobanana_eval_real_ref_dir "$NANO_EVAL" \
-    --mixed_lolv2_real_dir "$DATA" \
-    --freeze_stages "" \
-    --query_illum_align False \
-    --texture_fusion False \
-    --stage_mode_lv3 normal \
-    --stage_mode_lv2 normal \
-    --stage_mode_lv1 normal \
-    --tile_size 256 \
-    --tile_overlap 96 \
-    --tile_window cosine \
-    --num_gpu 1 \
+    --val_ratio 0.1 \
+    --split_seed 42 \
+    --print_every 10 \
+    --val_every 1 \
     --num_workers 4 \
     --seed 42 \
-    "${PRETRAIN_ARGS[@]}"
+    --num_gpu 1 \
+    "${INIT_ARGS[@]}"

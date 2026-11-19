@@ -165,130 +165,47 @@ class Trainer():
 
     def _tiled_forward(self, lr, lr_sr, ref, ref_sr, tile_size=None, overlap=None,
                        return_diag=False):
-        """Tiled inference to avoid OOM on large images.
-        Splits input into overlapping tiles, runs the model on each,
-        and blends overlapping regions with a configurable window.
+        """Tiled inference via shared ``model.tiled_infer`` (no args rewrite).
 
-        When query illumination alignment is enabled, gamma is estimated
-        once on the full image and reused for every tile.
-
-        Args:
-            lr, lr_sr, ref, ref_sr: [1, C, H, W] tensors
-            tile_size: tile edge length
-            overlap: overlap between adjacent tiles
-            return_diag: forward match/illum diagnostics (last tile)
-
-        Returns:
-            sr: [1, C, H, W] enhanced image
-            S, T_lv3, T_lv2, T_lv1: aggregated (tensors from last tile)
-            optionally match_diag, query_illum_info if return_diag
+        Returns the same tuple shape as a normal forward for caller compatibility.
+        ``return_diag`` is accepted but diagnostics are None under tiling.
         """
+        from model.tiled_infer import tiled_forward
+
         tile_size = tile_size or getattr(self.args, 'tile_size', 256)
         overlap = overlap if (overlap is not None) else getattr(
             self.args, 'tile_overlap', 96)
-        overlap = max(0, min(overlap, tile_size // 2))
-        window = getattr(self.args, 'tile_window', 'cosine').lower()
 
-        net = self.model.module if hasattr(self.model, 'module') else self.model
+        fwd = {}
         use_qia = getattr(self.args, 'query_illum_align', False)
         alpha = float(getattr(self.args, 'query_illum_alpha', 0.0))
         beta = float(getattr(self.args, 'query_hist_beta', 0.0))
-        gamma_override = None
-        lut_override = None
-        if use_qia and (alpha > 0.0 or beta > 0.0):
+        if use_qia and (alpha > 0.0 or beta > 0.0) and ref is not None:
             from model.query_illum_align import estimate_query_align_maps
-            # Full-image gamma + hist LUT once; reused for every tile.
-            gamma_override, lut_override, _ = estimate_query_align_maps(
+            g, lut, _ = estimate_query_align_maps(
                 lr_sr, ref,
                 alpha=alpha,
                 gamma_min=float(getattr(self.args, 'query_gamma_min', 0.3)),
                 gamma_max=float(getattr(self.args, 'query_gamma_max', 1.0)),
                 bins=int(getattr(self.args, 'query_hist_bins', 256)),
             )
+            fwd['query_gamma_override'] = g
+            if beta > 0.0:
+                fwd['query_hist_lut_override'] = lut
+        for k in ('stage_mode_lv3', 'stage_mode_lv2', 'stage_mode_lv1'):
+            if getattr(self.args, k, None) is not None:
+                fwd[k] = getattr(self.args, k)
 
-        _, _, H, W = lr.shape
-        fwd_kwargs = {}
-        if gamma_override is not None:
-            fwd_kwargs['query_gamma_override'] = gamma_override
-        if lut_override is not None and beta > 0.0:
-            fwd_kwargs['query_hist_lut_override'] = lut_override
+        sr = tiled_forward(
+            self.model, lr, lr_sr, ref, ref_sr,
+            tile_size=int(tile_size), overlap=int(overlap),
+            enable_grad=False,
+            apply_illum=True, apply_ref_illum=True,
+            fwd_extra=fwd,
+        )
         if return_diag:
-            fwd_kwargs['return_diag'] = True
-
-        if H <= tile_size and W <= tile_size:
-            return self.model(lr=lr, lrsr=lr_sr, ref=ref, refsr=ref_sr,
-                              **fwd_kwargs)
-
-        stride = max(1, tile_size - overlap)
-        # Number of tiles in each dimension
-        n_h = max(1, (H - overlap + stride - 1) // stride)
-        n_w = max(1, (W - overlap + stride - 1) // stride)
-
-        # Output accumulator and weight map for feathering
-        sr_accum = torch.zeros(1, 3, H, W, device=lr.device)
-        weight_accum = torch.zeros(1, 1, H, W, device=lr.device)
-
-        # Feathering mask: 1.0 in center, decays to 0 at edges
-        mask_y = torch.ones(tile_size, device=lr.device)
-        mask_x = torch.ones(tile_size, device=lr.device)
-        if overlap > 0:
-            if window == 'cosine':
-                ramp = 0.5 - 0.5 * torch.cos(
-                    torch.linspace(0, math.pi, overlap, device=lr.device))
-            else:
-                ramp = torch.linspace(0, 1, overlap, device=lr.device)
-            mask_y[:overlap] = ramp
-            mask_y[-overlap:] = ramp.flip(0)
-            mask_x[:overlap] = ramp
-            mask_x[-overlap:] = ramp.flip(0)
-        feather = mask_y[:, None] * mask_x[None, :]  # [tile, tile]
-        feather = feather.view(1, 1, tile_size, tile_size)
-
-        last_S, last_T3, last_T2, last_T1 = None, None, None, None
-        last_diag, last_qinfo = None, None
-        # The global illumination head is a per-image transform. Run the
-        # backbone per tile without it, then apply it once on the stitched
-        # result so tiles cannot get mismatched gamma/gain (visible seams).
-        has_illum = hasattr(net, 'apply_illum_head')
-        has_refillum = hasattr(net, 'apply_ref_illum')
-
-        for i_h in range(n_h):
-            y0 = min(i_h * stride, H - tile_size)
-            y1 = y0 + tile_size
-            for i_w in range(n_w):
-                x0 = min(i_w * stride, W - tile_size)
-                x1 = x0 + tile_size
-
-                tile_lr = lr[:, :, y0:y1, x0:x1]
-                tile_lr_sr = lr_sr[:, :, y0:y1, x0:x1]
-                tile_ref = ref[:, :, y0:y1, x0:x1]
-                tile_ref_sr = ref_sr[:, :, y0:y1, x0:x1]
-
-                tile_kwargs = dict(lr=tile_lr, lrsr=tile_lr_sr,
-                                   ref=tile_ref, refsr=tile_ref_sr,
-                                   **fwd_kwargs)
-                if has_illum:
-                    tile_kwargs['apply_illum'] = False
-                if has_refillum:
-                    tile_kwargs['apply_ref_illum'] = False
-                out = self.model(**tile_kwargs)
-                if return_diag:
-                    tile_sr, S, T3, T2, T1, last_diag, last_qinfo = out
-                else:
-                    tile_sr, S, T3, T2, T1 = out
-
-                sr_accum[:, :, y0:y1, x0:x1] += tile_sr * feather
-                weight_accum[:, :, y0:y1, x0:x1] += feather
-                last_S, last_T3, last_T2, last_T1 = S, T3, T2, T1
-
-        sr = sr_accum / weight_accum.clamp(min=1e-8)
-        if has_refillum:
-            sr = net.apply_ref_illum(sr, lr, ref)
-        if has_illum:
-            sr = net.apply_illum_head(sr, lr)
-        if return_diag:
-            return sr, last_S, last_T3, last_T2, last_T1, last_diag, last_qinfo
-        return sr, last_S, last_T3, last_T2, last_T1
+            return sr, None, None, None, None, None, None
+        return sr, None, None, None, None
 
     def _tta_forward(self, one_fn, lr, lr_sr, ref, ref_sr):
         """8-view test-time augmentation: 4 rotations x 2 flips, averaged.
@@ -316,8 +233,8 @@ class Trainer():
 
     def train(self, current_epoch=0, is_init=False):
         self.model.train()
-        if (not is_init):
-            self.scheduler.step()
+        # Epoch-level StepLR: step once *after* the epoch's optimizer updates
+        # (see end of this method). Never advance before the first step.
         self.logger.info('Current epoch learning rate: %e' %(self.optimizer.param_groups[0]['lr']))
 
         epoch_rec, epoch_ms, epoch_n = 0.0, 0.0, 0
@@ -431,6 +348,15 @@ class Trainer():
                         self.logger.info('ref_correct_loss: %.10f'
                                          % (ref_correct_loss.item()))
 
+            if not torch.isfinite(loss).all() or not torch.isfinite(sr).all():
+                sid = sample_batched.get('id', None)
+                raise RuntimeError(
+                    'Non-finite loss/output at epoch=%s step=%s sample_id=%s '
+                    'loss=%s sr_finite=%s'
+                    % (current_epoch, i_batch + 1, sid,
+                       float(loss.detach().cpu()) if loss.numel() == 1 else 'tensor',
+                       bool(torch.isfinite(sr).all())))
+
             loss.backward()
             self.optimizer.step()
 
@@ -438,6 +364,10 @@ class Trainer():
             self.logger.info(
                 'epoch %d train_avg  rec_loss: %.6f  ms_ssim_loss: %.6f  (n=%d)'
                 % (current_epoch, epoch_rec / epoch_n, epoch_ms / epoch_n, epoch_n))
+
+        # Epoch-level LR schedule: exactly one step after optimizer updates.
+        if not is_init:
+            self.scheduler.step()
 
         if ((not is_init) and current_epoch % self.args.save_every == 0):
             self.logger.info('saving the model...')
