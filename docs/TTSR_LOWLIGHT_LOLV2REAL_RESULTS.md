@@ -1,7 +1,9 @@
 # TTSR-lowlight LOLv2-Real Domain FT — Results
 
-**Verdict:** 延续 H3。LOLv2 上有效组合是 **L1@100 P2 + H1@1000 Enc/Match + 华为 H3@2000 头，不再 FT** → Official Test **21.104**  
-(+0.25 vs L1 P2 20.852；+0.17 vs H1-only 20.931)。对本域再训 H3 头只会掉分。
+**Verdict（正式 / P2-only）：** Official Test 最佳为 **L1 P2@100 = 20.8515 / 0.7996**  
+（相对 Huawei `model_00004` P0 20.704 **+0.15**）。产品线只保留 P2；见 `docs/TTSR_LOWLIGHT_P2_ONLY_EVAL.md`。
+
+**附录（非正式）：** H1@1000 Enc/Match + 华为 H3 头、不再 FT 可达 21.104；对本域再训 H3 头会掉分。H3 不作为正式结果。
 
 ## Protocol
 
@@ -121,9 +123,9 @@ L2/L2b 无效是因为协议错了。华为有效 H3 不是“冻 P2 在线乱�
 Ckpt: `h3_v2recipe/checkpoints/H3_h1feat_huaweiHead_s42/checkpoint_00000.pt`  
 导出: `/root/data/eval/lolv2-H3-h1feat-huaweiHead/`
 
-**当前最佳：** 该 H3 组装（21.104）。
+**非正式最佳（含 H3）：** 该组装 21.104。**正式最佳仍为 L1 P2@100。**
 
-## Final export — L1@100（P2-only 对照）
+## Final export — L1@100（正式 P2-only）
 
 Dir: `/root/data/eval/lolv2-L1-best/` (`save_results/` + GT/Low/P2 + metrics)
 
