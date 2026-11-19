@@ -117,8 +117,13 @@ restoration_blocks=1,1  restoration_heads=1  restoration_ffn_expansion=4
 lowpass_kernel=binomial  lowpass_kernel_size=5
 ```
 
-- `checkpoint_schema_version = 3`; packs carry a top-level `model_variant`.
-  All identity keys are locked on resume.
+- `checkpoint_schema_version = 4`. Packs still carry a top-level
+  `model_variant`. Schema 4 is the checkpoint format (safe RNG encoding, CPU
+  pack load). It is not an architecture change. Schema 3 packs of this same
+  model are refused until an explicit `migrate_schema3_checkpoint(src, dst)`;
+  that writes a new file and does not edit the saved split hash. All identity
+  keys stay locked on resume. Operational rules (RNG, manifest v3, eval
+  pack-only, coverage) are in `docs/BLOCK_AMEND_TRAINING_BASELINE.md`.
 - `--igab_blocks` / `--igab_heads` survive only as deprecated CLI aliases of
   `--restoration_blocks` / `--restoration_heads`: they warn, an explicit
   conflict is an error, and resolved configs only contain the neutral names.
@@ -184,11 +189,19 @@ and `Trainer.load`, LTE-only leaves the backbone untouched.
 (64 ch, 8+8+4+2) L1 + MS-SSIM step with the real VGG19 LTE on random 160x160
 tensors and checks finite gradients.
 
+The schema-4 closeout re-ran these four files and added
+`tests/test_block_amend_round3.py`. That file includes one real CUDA resume
+of a stub-LTE synthetic run (RNG stayed a CPU `uint8` tensor, then one more
+optimizer step). It is an engineering smoke, not a trained-model result.
+`weights_only=True` was not executed on this PyTorch 1.12, because
+`torch.load` has no such argument.
+
 Not verified:
 
 - Any training on real data, any validation or Official Test number, any
   comparison against the IGAB variant.
-- GPU execution, `DataParallel`, multi-worker loaders, mid-epoch resume.
+- `DataParallel`, multi-worker loaders, mid-epoch resume, and GPU training
+  of the real VGG LTE.
 - Rejection of a *real* IGAB block-amend checkpoint file: none exists on this
   machine, so the tests use an LFCA pack re-keyed to the IGAB layout.
 - Whole-model fresh-init parity with the IGAB variant.
@@ -196,40 +209,38 @@ Not verified:
   noted for round 2 remain (continuous-vs-resumed parameter equality,
   multi-worker augmentation consistency).
 
-Known blocker for a formal run (data, unrelated to LFCA): 50 Train images have
-no reference under `Train/nanobanana_ref_v2`, so strict `train` / `preflight`
-stop with "50 samples missing Nano ref". Either supply those references or pass
-`--allow_partial_coverage` (639 samples; writes include/exclude manifests).
-`train/train_block_amend_csfi_lolv2.sh` does not pass that flag.
+A later engineering pass (same model, schema 4) fixed resume RNG device
+placement, made the manifest relative path the only path source, checks split
+identity on an independent internal val, accepts only a full pack for eval,
+and wires `ALLOW_PARTIAL_COVERAGE=0|1` in
+`train/train_block_amend_csfi_lolv2.sh` (default 0). None of that changes the
+LFCA definition above.
+
+Data, unrelated to LFCA: a read-only scan on 2026-11-19 of
+`/root/data/datasets/lol-v2-real` still saw 639 Train triplets and 50 Train
+images with no file under `Train/nanobanana_ref_v2`, and 100/0 on Test
+`nanobanana_ref_v3`. Those counts are an observation, not constants. Strict
+`train` / `preflight` stop while any Train reference is missing. The explicit
+subset is `ALLOW_PARTIAL_COVERAGE=1`, which drops only missing references.
 
 ## Commands (not executed as formal runs)
+
+The copy-paste set, including strict and partial preflight, lives in
+`docs/BLOCK_AMEND_TRAINING_BASELINE.md`. Preflight `save_dir` and the formal
+run `save_dir` are different. Short form:
 
 ```bash
 cd /root/projects/TTSR-lowlight-v1-data1SOTA
 source /root/miniconda3/etc/profile.d/conda.sh && conda activate ttsr
 export TORCH_HOME=/root/data/cache/torch
-EXP=/root/data/experiments/TTSR-lowlight-block-amend
 
-# preflight (no training)
-python block_amend_main.py --mode preflight --model_variant csfi_lfca_v1 \
-  --dataset_dir /root/data/datasets/lol-v2-real \
-  --save_dir $EXP/preflight_csfi_lfca_v1 --init_scope fresh
+# strict fresh training (stops if any Train reference is missing)
+RUN_NAME=csfi_lfca_v1_lolv2_run1 ALLOW_PARTIAL_COVERAGE=0 \
+  bash train/train_block_amend_csfi_lolv2.sh
 
-# fresh train (strict reference coverage)
-RUN_NAME=csfi_lfca_v1_lolv2_run1 bash train/train_block_amend_csfi_lolv2.sh
-
-# resume (config, split and model identity come from the checkpoint)
-python block_amend_main.py --mode resume \
-  --save_dir $EXP/csfi_lfca_v1_lolv2_run1 \
-  --resume_checkpoint $EXP/csfi_lfca_v1_lolv2_run1/checkpoint_last.pt
-
-# eval: internal val / Official Test
-python block_amend_main.py --mode eval --eval_split val \
-  --model_path $EXP/csfi_lfca_v1_lolv2_run1/checkpoint_best_val_psnr.pt \
-  --save_dir $EXP/csfi_lfca_v1_lolv2_run1/eval_val
-python block_amend_main.py --mode eval --eval_split test --save_images \
-  --model_path $EXP/csfi_lfca_v1_lolv2_run1/checkpoint_best_val_psnr.pt \
-  --save_dir $EXP/csfi_lfca_v1_lolv2_run1/official_test
+# explicit existing-reference subset
+RUN_NAME=csfi_lfca_v1_lolv2_partial_run1 ALLOW_PARTIAL_COVERAGE=1 \
+  bash train/train_block_amend_csfi_lolv2.sh
 ```
 
 ## How to read this change

@@ -634,7 +634,7 @@ def test_f_save_restore_and_variant_lock():
     from model.TTSREnhance import load_pretrained_weights
     from model.weight_init import load_lte_only, load_strict_state
 
-    assert CHECKPOINT_SCHEMA_VERSION == 3
+    assert CHECKPOINT_SCHEMA_VERSION == 4
     for k in RESTORATION_CONFIG_KEYS:
         assert k in LOCKED_CONFIG_KEYS and k in bam.BASELINE_FIXED
     assert not any(k.startswith('igab') for k in LOCKED_CONFIG_KEYS)
@@ -663,7 +663,7 @@ def test_f_save_restore_and_variant_lock():
         last_path = os.path.join(save, 'checkpoint_last.pt')
         pack = torch.load(last_path)
         require_resume_fields(pack, last_path)
-        assert pack['checkpoint_schema_version'] == 3
+        assert pack['checkpoint_schema_version'] == 4
         assert pack['model_variant'] == 'csfi_lfca_v1'
         cfg = pack['config']
         for k, v in RESTORATION_DEFAULTS.items():
@@ -680,7 +680,7 @@ def test_f_save_restore_and_variant_lock():
             model_variant='csfi_lfca_v1', restoration_block='lfca',
             coarse_depth=1, middle_depth=1, heads=1, ffn_expansion=4,
             lowpass_kernel='binomial', lowpass_kernel_size=5)
-        assert meta['checkpoint_schema_version'] == 3
+        assert meta['checkpoint_schema_version'] == 4
 
         # ---- strict save + load reproduces the model ----
         m_b = _stub_model()

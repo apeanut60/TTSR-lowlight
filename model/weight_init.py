@@ -14,6 +14,7 @@ from typing import Any, Dict, Iterable, Optional, Tuple
 import torch
 import torch.nn as nn
 
+from block_amend_ckpt import load_local_checkpoint
 from model.restoration_config import reject_legacy_igab_state
 
 
@@ -112,7 +113,9 @@ def load_lte_only(model: nn.Module, checkpoint_path: str, device='cpu',
     if getattr(wrap, 'RefCorrection', None) is not None:
         before_ref = _clone_params(wrap.RefCorrection)
 
-    raw = torch.load(checkpoint_path, map_location=device)
+    # CPU load. LTE tensors are copied into the module, which may live on CUDA.
+    # ``device`` is kept for callers; the pack itself is not moved there.
+    raw = load_local_checkpoint(checkpoint_path, logger=logger)
     state = unwrap_checkpoint(raw, checkpoint_path)
 
     lte_prefix = 'LTE.'
@@ -158,11 +161,20 @@ def load_lte_only(model: nn.Module, checkpoint_path: str, device='cpu',
 
 
 def load_strict_state(model: nn.Module, checkpoint_path: str, device='cpu',
-                      logger=None, mode='inference') -> int:
-    """Strict load of model weights (architecture must match)."""
-    if not checkpoint_path or not os.path.isfile(checkpoint_path):
-        raise FileNotFoundError('Checkpoint not found: %r' % checkpoint_path)
-    raw = torch.load(checkpoint_path, map_location=device)
+                      logger=None, mode='inference', preloaded=None) -> int:
+    """Strict load of model weights (architecture must match).
+
+    The pack is read on CPU (or ``preloaded`` is reused) and copied into the
+    module's existing parameters, which already sit on ``device``. The pack
+    is not moved onto CUDA as a whole. Pass ``preloaded`` to avoid a second
+    read of a pack that was already validated.
+    """
+    if preloaded is not None:
+        raw = preloaded
+    else:
+        if not checkpoint_path or not os.path.isfile(checkpoint_path):
+            raise FileNotFoundError('Checkpoint not found: %r' % checkpoint_path)
+        raw = load_local_checkpoint(checkpoint_path, logger=logger)
     # Prefer nested model state when present (resume packs).
     if isinstance(raw, dict) and 'model_state_dict' in raw:
         state = unwrap_checkpoint(raw, checkpoint_path)

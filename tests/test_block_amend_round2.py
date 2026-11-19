@@ -337,7 +337,7 @@ def test_last_best_bookkeeping():
 # ---- 6. resume rejects missing split / incomplete pack ----
 def test_resume_rejects():
     from block_amend_ckpt import require_resume_fields
-    # Model identity is checked first (schema v3): a pack that declares no
+    # Model identity is checked first: a pack that declares no
     # model_variant is refused for that reason...
     try:
         require_resume_fields({'model_state_dict': {}})
@@ -527,14 +527,16 @@ def test_tampered_manifest():
     path = os.path.join(save, 'splits', 'split_train.json')
     with open(path) as f:
         data = json.load(f)
+    # Absolute path edited, relative path left as saved. Resume must refuse
+    # before it opens either path.
     data['items'][0]['ref'] = data['items'][0]['ref'] + '.missing'
     with open(path, 'w') as f:
         json.dump(data, f)
     try:
         prepare_data(args, Log(), mode='resume', explicit_split_dir=False)
-        assert False
-    except FileNotFoundError:
-        pass
+        assert False, 'tampered manifest was accepted'
+    except RuntimeError as e:
+        assert 'disagree' in str(e), str(e)
     print('tampered_manifest ok')
 
 

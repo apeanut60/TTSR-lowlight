@@ -26,14 +26,15 @@ from torch.utils.data import DataLoader
 from block_amend_ckpt import (
     CHECKPOINT_SCHEMA_VERSION, LOCKED_CONFIG_KEYS, RESUME_ALLOWED_OVERRIDES,
     atomic_torch_save, build_checkpoint_pack, capture_rng_state,
-    check_grad_finite, explicit_cli_dests, merge_resume_config,
-    require_resume_fields, resolved_config_from_args, restore_rng_state,
+    check_grad_finite, explicit_cli_dests, load_local_checkpoint,
+    merge_resume_config, require_resume_fields, resolved_config_from_args,
+    restore_rng_state,
 )
 from dataset.block_amend_lolv2 import (
-    BlockAmendEvalSet, BlockAmendTrainSet, collect_triplets,
-    load_manifest_items, manifest_identity_hash, save_split_manifests,
-    split_train_val, validate_split_manifests, write_coverage_manifests,
-    MANIFEST_HASH_VERSION,
+    REFERENCE_SOURCE, BlockAmendEvalSet, BlockAmendTrainSet, assert_split_identity,
+    collect_triplets, load_manifest_items, manifest_identity_hash,
+    materialize_items, save_split_manifests, split_train_val,
+    validate_split_manifests, write_coverage_manifests, MANIFEST_HASH_VERSION,
 )
 from model.TTSREnhance import TTSREnhance
 from model.restoration_config import (
@@ -145,7 +146,8 @@ def build_parser():
     p.add_argument('--init_checkpoint', type=str, default='')
     p.add_argument('--resume_checkpoint', type=str, default='')
     p.add_argument('--model_path', type=str, default='',
-                   help='For eval: checkpoint pack or bare weights')
+                   help='Eval: a complete checkpoint pack (config + model_variant). '
+                        'A bare state_dict is refused.')
     p.add_argument('--val_ratio', type=float, default=0.1)
     p.add_argument('--split_seed', type=int, default=42)
     p.add_argument('--split_dir', type=str, default='',
@@ -308,6 +310,14 @@ def prepare_data(args, logger, mode, explicit_split_dir: bool):
             train_items, val_items, split_dir,
             dataset_dir=args.dataset_dir, ref_subdir=args.train_ref_subdir,
             batch_size=args.batch_size)
+        if getattr(args, 'allow_partial_coverage', False):
+            identity['coverage'] = 'explicit_partial'
+            identity['include_count'] = int(cov['include_count'])
+            identity['exclude_missing_ref'] = int(cov['exclude_missing_ref'])
+        else:
+            identity['coverage'] = 'strict'
+            identity['include_count'] = len(include)
+            identity['exclude_missing_ref'] = 0
         logger.info('Created split: %s' % json.dumps(identity))
 
     if getattr(args, 'persistent_workers', False):
@@ -437,7 +447,7 @@ def _assert_best_identity_safe(save_dir, pack, logger):
     best_path = os.path.join(save_dir, 'checkpoint_best_val_psnr.pt')
     if not os.path.isfile(best_path):
         return
-    best = torch.load(best_path, map_location='cpu')
+    best = load_local_checkpoint(best_path)
     if not isinstance(best, dict):
         raise RuntimeError('Corrupt best checkpoint at %s' % best_path)
     if best.get('run_id') and pack.get('run_id') and best['run_id'] != pack['run_id']:
@@ -568,7 +578,9 @@ def main(argv=None):
     if cli.mode == 'resume':
         if not cli.resume_checkpoint:
             raise SystemExit('resume requires --resume_checkpoint')
-        raw = torch.load(cli.resume_checkpoint, map_location='cpu')
+        # One CPU load. Reused for the weight/optimizer/RNG restore below;
+        # the pack is not read again and is not moved onto CUDA.
+        raw = load_local_checkpoint(cli.resume_checkpoint)
         require_resume_fields(raw, cli.resume_checkpoint)
         args, applied = merge_resume_config(
             raw['config'], cli, explicit, BASELINE_FIXED)
@@ -584,39 +596,31 @@ def main(argv=None):
     elif cli.mode == 'eval':
         if not cli.model_path:
             raise SystemExit('eval requires --model_path')
-        raw = torch.load(cli.model_path, map_location='cpu')
-        if isinstance(raw, dict) and 'config' in raw and 'model_state_dict' in raw:
-            # Eval rebuilds the model from the checkpoint config; refuse packs
-            # of another model_variant (e.g. IGAB) before building anything.
-            require_model_variant(raw, cli.model_path)
-            args, applied = merge_resume_config(
-                raw['config'], cli, explicit, BASELINE_FIXED)
-            args.model_path = cli.model_path
-            args.mode = 'eval'
-            args.eval_split = cli.eval_split
-            args.save_images = cli.save_images
-            args.save_dir = cli.save_dir
-            os.makedirs(args.save_dir, exist_ok=True)
-        else:
-            # Bare weights. IGAB-variant weights are refused outright (the
-            # model_variant differs), before any config question is asked.
+        raw = load_local_checkpoint(cli.model_path)
+        # Eval only rebuilds a model from a pack that carries its own config
+        # and model_variant. A bare state_dict cannot recover the behavior.
+        pack_ok = (isinstance(raw, dict) and isinstance(raw.get('config'), dict)
+                   and isinstance(raw.get('model_state_dict'), dict)
+                   and (raw.get('model_variant') or raw['config'].get('model_variant')))
+        if not pack_ok:
             if isinstance(raw, dict):
-                _sd = raw.get('model_state_dict', raw)
-                if isinstance(_sd, dict):
-                    reject_legacy_igab_state(_sd.keys(), cli.model_path)
-            # Otherwise: require explicit locked config on CLI
-            missing = [k for k in ('backbone', 'num_res_blocks', 'n_feats',
-                                   'enable_lightup', 'stage_mode_lv2')
-                       if k not in explicit]
-            if missing:
-                raise SystemExit(
-                    'Bare weights require explicit config on CLI for %s '
-                    '(refusing silent defaults)' % missing)
-            args = make_args(cli)
-            applied = {k: getattr(cli, k) for k in explicit if hasattr(cli, k)}
-            os.makedirs(args.save_dir, exist_ok=True)
-            raw = {'model_state_dict': raw} if not (
-                isinstance(raw, dict) and 'model_state_dict' in raw) else raw
+                state = raw.get('model_state_dict', raw)
+                if isinstance(state, dict):
+                    reject_legacy_igab_state(state.keys(), cli.model_path)
+            raise SystemExit(
+                'eval requires a complete checkpoint pack with config and '
+                'model_variant. A bare state_dict cannot safely rebuild the '
+                'behavior config (%s).' % cli.model_path)
+        # Other variants (IGAB) are refused before a model is built.
+        require_model_variant(raw, cli.model_path)
+        args, applied = merge_resume_config(
+            raw['config'], cli, explicit, BASELINE_FIXED)
+        args.model_path = cli.model_path
+        args.mode = 'eval'
+        args.eval_split = cli.eval_split
+        args.save_images = cli.save_images
+        args.save_dir = cli.save_dir
+        os.makedirs(args.save_dir, exist_ok=True)
     else:
         args = make_args(cli)
         applied = {}
@@ -645,6 +649,9 @@ def main(argv=None):
 
     if args.mode == 'preflight':
         logger.info('Preflight only — no training')
+        logger.info('Coverage mode: %s' % (
+            'explicit partial coverage' if args.allow_partial_coverage
+            else 'strict coverage'))
         logger.info('Python %s  PyTorch %s' % (sys.version.split()[0], torch.__version__))
         if args.allow_partial_coverage:
             cov = write_coverage_manifests(
@@ -669,38 +676,49 @@ def main(argv=None):
         return
 
     if args.mode == 'eval':
-        model = build_model(args, device)
-        load_strict_state(model, args.model_path, device=device, logger=logger,
-                          mode='inference')
+        # Identity is checked before the model is built and before any
+        # forward, metric file or image export.
         if args.eval_split == 'test':
             items, _ = collect_triplets(
                 args.dataset_dir, 'Test', subset='real',
                 ref_subdir=args.test_ref_subdir, require_all=True)
-            # Synthetic identity for test
+            items = materialize_items(items, args.dataset_dir)
+            # Official Test has its own identity. It is not required to match
+            # the checkpoint's internal val, and training never opens it.
             identity = {
+                'role': 'official_test',
                 'train_hash': None,
-                'val_hash': manifest_identity_hash(
+                'val_hash': None,
+                'test_hash': manifest_identity_hash(
                     items, args.dataset_dir, 'test', args.test_ref_subdir),
                 'ref_subdir': args.test_ref_subdir,
+                'reference_source': REFERENCE_SOURCE,
+                'manifest_hash_version': MANIFEST_HASH_VERSION,
             }
-            loader = DataLoader(BlockAmendEvalSet(items), batch_size=1,
-                                shuffle=False, num_workers=args.num_workers,
-                                persistent_workers=False)
+            eval_items = items
             tag = 'official_test'
         else:
             split_dir = args.split_dir or os.path.join(
                 os.path.dirname(args.model_path), 'splits')
             if args.split_dir == '' and not os.path.isdir(split_dir):
-                # try save_dir/splits
                 split_dir = os.path.join(args.save_dir, 'splits')
-            train_items, val_items, identity = _load_locked_split(split_dir, args)
-            loader = DataLoader(BlockAmendEvalSet(val_items), batch_size=1,
-                                shuffle=False, num_workers=args.num_workers,
-                                persistent_workers=False)
+            _train_items, val_items, identity = _load_locked_split(split_dir, args)
+            assert_split_identity(identity, raw['split_identity'], 'eval val')
+            eval_items = val_items
             tag = 'val'
+        model = build_model(args, device)
+        load_strict_state(model, args.model_path, device=device, logger=logger,
+                          mode='inference', preloaded=raw)
+        loader = DataLoader(BlockAmendEvalSet(eval_items), batch_size=1,
+                            shuffle=False, num_workers=args.num_workers,
+                            persistent_workers=False)
         summary = evaluate_loader(
             model, loader, args, device, save_dir=args.save_dir, tag=tag,
             split_identity=identity)
+        summary['checkpoint_path'] = args.model_path
+        summary['checkpoint_epoch'] = raw.get('epoch')
+        summary['model_variant'] = raw.get('model_variant')
+        summary['metric_protocol'] = PROTOCOL_NAME
         out = os.path.join(args.save_dir, 'eval_%s.json' % tag)
         with open(out, 'w') as f:
             json.dump(summary, f, indent=2)
@@ -716,23 +734,20 @@ def main(argv=None):
         args, logger, mode=args.mode, explicit_split_dir=explicit_split)
 
     if args.mode == 'resume':
-        raw = torch.load(args.resume_checkpoint, map_location=device)
-        require_resume_fields(raw, args.resume_checkpoint)
-        # Split identity must match
-        ckpt_id = raw['split_identity']
-        for key in ('train_hash', 'val_hash', 'ref_subdir'):
-            if ckpt_id.get(key) != identity.get(key):
-                raise RuntimeError(
-                    'Split identity mismatch on %s: ckpt=%r live=%r'
-                    % (key, ckpt_id.get(key), identity.get(key)))
+        # ``raw`` is the pack already read on CPU and validated above.
+        assert_split_identity(identity, raw['split_identity'], 'resume')
         run_id = raw.get('run_id') or str(uuid.uuid4())
         model = build_model(args, device)
         load_strict_state(model, args.resume_checkpoint, device=device,
-                          logger=logger, mode='resume')
+                          logger=logger, mode='resume', preloaded=raw)
         opt, sched = build_optimizer(model, args)
+        # Adam.load_state_dict places momentum on the parameter device and
+        # leaves ``step`` where this PyTorch stored it. Do not .cuda() the
+        # whole optimizer state.
         opt.load_state_dict(raw['optimizer_state_dict'])
         sched.load_state_dict(raw['scheduler_state_dict'])
-        # Restore RNG after model/opt construction, before next epoch iterator
+        # RNG last, after every construction that consumes randomness, and
+        # before train_loop creates the next iterator.
         restore_rng_state(raw['rng'], train_gen, val_gen)
         start_epoch = int(raw['epoch']) + 1
         global_step = int(raw['global_step'])

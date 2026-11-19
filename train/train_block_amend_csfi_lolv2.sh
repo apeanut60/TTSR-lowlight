@@ -18,13 +18,35 @@ TEST_REF="${TEST_REF:-nanobanana_ref_v3}"
 # Optional LTE-only warm-start (explicit). Leave empty for pure fresh.
 INIT_SCOPE="${INIT_SCOPE:-fresh}"
 INIT_CHECKPOINT="${INIT_CHECKPOINT:-}"
+# 0: every Train Low/GT must have a generated ref. 1: drop only samples
+# whose ref is missing, and record the include/exclude lists. Anything else
+# is an error. Counts are whatever the dataset has now; they are not baked in.
+ALLOW_PARTIAL_COVERAGE="${ALLOW_PARTIAL_COVERAGE:-0}"
+PYTHON="${PYTHON:-python}"
+
+case "$ALLOW_PARTIAL_COVERAGE" in
+  0)
+    COVERAGE_ARGS=()
+    COVERAGE_LABEL="strict coverage"
+    ;;
+  1)
+    COVERAGE_ARGS=(--allow_partial_coverage)
+    COVERAGE_LABEL="explicit partial coverage"
+    ;;
+  *)
+    echo "ERROR: ALLOW_PARTIAL_COVERAGE must be 0 or 1, got '$ALLOW_PARTIAL_COVERAGE'" >&2
+    exit 1
+    ;;
+esac
 
 echo "============================================"
 echo " block-amend CSFI-U-Net ($MODEL_VARIANT)"
 echo " mode=train  init_scope=$INIT_SCOPE"
 echo " backbone=csfi_unet  num_res_blocks=8+8+4+2"
 echo " model_variant=$MODEL_VARIANT  restoration_block=lfca  blocks=1,1  heads=1"
-echo " data=$DATA  train_ref=$TRAIN_REF"
+echo " coverage=$COVERAGE_LABEL"
+echo " data=$DATA"
+echo " train_ref=$TRAIN_REF  test_ref=$TEST_REF"
 echo " save_dir=$SAVE_DIR"
 echo " code=$ROOT"
 echo "============================================"
@@ -47,7 +69,7 @@ elif [[ -n "$INIT_CHECKPOINT" ]]; then
   exit 1
 fi
 
-python block_amend_main.py \
+"$PYTHON" block_amend_main.py \
     --mode train \
     --model_variant "$MODEL_VARIANT" \
     --dataset_dir "$DATA" \
@@ -67,4 +89,5 @@ python block_amend_main.py \
     --num_workers 4 \
     --seed 42 \
     --num_gpu 1 \
+    "${COVERAGE_ARGS[@]}" \
     "${INIT_ARGS[@]}"

@@ -20,7 +20,16 @@ import torch
 
 
 IMG_EXTS = ('.png', '.jpg', '.jpeg', '.PNG', '.JPG', '.JPEG')
-MANIFEST_HASH_VERSION = 'v2'
+# v3: hash and imread share one relative path. v2 hashed *_rel and could
+# read a different absolute path. A v2 hash is not reused or rewritten.
+MANIFEST_HASH_VERSION = 'v3'
+REFERENCE_SOURCE = 'generated_nano'
+_PATH_KEYS = ('low', 'normal', 'ref')
+# Compared for resume and for an independent internal-val eval.
+SPLIT_IDENTITY_FIELDS = (
+    'train_hash', 'val_hash', 'ref_subdir',
+    'manifest_hash_version', 'reference_source',
+)
 
 
 def stable_aug_seed(base_seed: int, epoch: int, sample_id: str) -> int:
@@ -38,6 +47,69 @@ def normalize_rel_path(path: str, dataset_dir: str) -> str:
     except ValueError:
         rel = path
     return rel.replace('\\', '/')
+
+
+def canonical_rel(rel: str) -> str:
+    """One spelling for a dataset-relative path. Rejects absolute and '..'."""
+    text = str(rel).strip().replace('\\', '/')
+    if os.path.isabs(text):
+        raise RuntimeError('manifest path is absolute, expected relative: %s' % text)
+    parts = []
+    for part in text.split('/'):
+        if part in ('', '.'):
+            continue
+        if part == '..':
+            raise RuntimeError('manifest path escapes the dataset root: %s' % text)
+        parts.append(part)
+    if not parts:
+        raise RuntimeError('empty manifest path')
+    return '/'.join(parts)
+
+
+def materialize_item(item: Dict, read_root: str) -> Dict:
+    """Resolve ``low``/``normal``/``ref`` from the relative paths.
+
+    The relative path is the only source of truth. When the record also
+    carries an absolute path, it must equal ``recorded dataset_dir + rel``;
+    otherwise this raises and names both paths. It does not keep whichever
+    file happens to exist. ``read_root`` may be a new dataset root: every
+    file is then rebuilt under that one root.
+    """
+    read_root = os.path.normpath(read_root)
+    recorded = os.path.normpath(item.get('dataset_dir') or read_root)
+    out = dict(item)
+    mismatches = []
+    sid = item.get('id')
+    for key in _PATH_KEYS:
+        rel_raw = item.get(key + '_rel')
+        abs_raw = item.get(key)
+        if rel_raw:
+            rel = canonical_rel(rel_raw)
+        elif abs_raw:
+            rel = canonical_rel(normalize_rel_path(abs_raw, recorded))
+        else:
+            raise RuntimeError('id=%s has no %s path' % (sid, key))
+        expected = os.path.normpath(os.path.join(recorded, *rel.split('/')))
+        if abs_raw and os.path.normpath(abs_raw) != expected:
+            mismatches.append((key, os.path.normpath(abs_raw), expected, rel))
+        out[key + '_rel'] = rel
+        out[key] = os.path.normpath(os.path.join(read_root, *rel.split('/')))
+    if mismatches:
+        detail = '; '.join(
+            'id=%s field=%s absolute=%s recorded+rel=%s (rel=%s)'
+            % (sid, key, actual, expected, rel)
+            for key, actual, expected, rel in mismatches)
+        raise RuntimeError(
+            'Manifest absolute path and relative path disagree. Neither path '
+            'is chosen automatically. %s' % detail)
+    out['dataset_dir'] = read_root
+    if 'reference_source' not in out:
+        out['reference_source'] = REFERENCE_SOURCE
+    return out
+
+
+def materialize_items(items: Sequence[Dict], read_root: str) -> List[Dict]:
+    return [materialize_item(it, read_root) for it in items]
 
 
 def _to_rgb_uint8(img: np.ndarray) -> np.ndarray:
@@ -127,17 +199,23 @@ def collect_triplets(
         if not rec['has_ref']:
             missing_ref.append(rec)
             continue
+        rels = {
+            'low_rel': canonical_rel(normalize_rel_path(rec['low'], dataset_dir)),
+            'normal_rel': canonical_rel(normalize_rel_path(rec['normal'], dataset_dir)),
+            'ref_rel': canonical_rel(normalize_rel_path(rec['ref'], dataset_dir)),
+        }
+        root = os.path.normpath(dataset_dir)
         ok.append(dict(
             id=sid,
-            low=rec['low'],
-            normal=rec['normal'],
-            ref=rec['ref'],
-            split=split,
+            # Absolute paths are derived from the relative paths, not a second source.
+            low=os.path.normpath(os.path.join(root, *rels['low_rel'].split('/'))),
+            normal=os.path.normpath(os.path.join(root, *rels['normal_rel'].split('/'))),
+            ref=os.path.normpath(os.path.join(root, *rels['ref_rel'].split('/'))),
+            split=split,                 # source partition (Train / Test)
             ref_subdir=ref_subdir,
-            dataset_dir=os.path.normpath(dataset_dir),
-            low_rel=normalize_rel_path(rec['low'], dataset_dir),
-            normal_rel=normalize_rel_path(rec['normal'], dataset_dir),
-            ref_rel=normalize_rel_path(rec['ref'], dataset_dir),
+            reference_source=REFERENCE_SOURCE,
+            dataset_dir=root,
+            **rels,
         ))
 
     if require_all and missing_ref:
@@ -170,25 +248,44 @@ def manifest_identity_hash(
     dataset_dir: str,
     split_name: str,
     ref_subdir: str,
+    reference_source: str = REFERENCE_SOURCE,
 ) -> str:
-    """Identity hash over sorted relative paths + ref_subdir (not file contents).
+    """Identity hash over the same relative paths imread will open.
 
-    Format version: ``MANIFEST_HASH_VERSION``. Changing ref_subdir with the same
-    basenames yields a different hash. This is **not** a content fingerprint.
+    Locks the sample ids, the split role, the reference version and the
+    relative paths. It is not a content fingerprint: replacing a file without
+    changing its path does not change this hash, and file bytes are not
+    re-hashed every epoch.
+
+    ``split_name`` is the role (train / val / test), not the source partition.
+    Source partition stays on the item (``split``, Train or Test). Internal
+    val stays a role over the Train partition; it is never Official Test.
     """
+    dataset_dir = os.path.normpath(dataset_dir)
     rows = []
     for x in sorted(items, key=lambda z: str(z['id'])):
-        low = x.get('low_rel') or normalize_rel_path(x['low'], dataset_dir)
-        normal = x.get('normal_rel') or normalize_rel_path(x['normal'], dataset_dir)
-        ref = x.get('ref_rel') or normalize_rel_path(x['ref'], dataset_dir)
-        rows.append({
-            'id': x['id'],
-            'split': split_name,
+        row = {
+            'id': str(x['id']),
+            'role': split_name,
+            'source_split': str(x.get('split') or ''),
             'ref_subdir': ref_subdir,
-            'low': low,
-            'normal': normal,
-            'ref': ref,
-        })
+            'reference_source': reference_source,
+        }
+        for key in _PATH_KEYS:
+            rel_raw = x.get(key + '_rel')
+            if not rel_raw:
+                raise RuntimeError(
+                    'id=%s has no %s_rel. The hash refuses to fall back to a '
+                    'separate absolute path.' % (x.get('id'), key))
+            rel = canonical_rel(rel_raw)
+            resolved = os.path.normpath(os.path.join(dataset_dir, *rel.split('/')))
+            actual = os.path.normpath(x[key])
+            if actual != resolved:
+                raise RuntimeError(
+                    'id=%s field=%s hash path %s != read path %s'
+                    % (x.get('id'), key, resolved, actual))
+            row[key] = rel
+        rows.append(row)
     payload = json.dumps(
         {'version': MANIFEST_HASH_VERSION, 'items': rows},
         sort_keys=True, separators=(',', ':'))
@@ -223,11 +320,17 @@ def validate_split_manifests(
     batch_size: int,
     drop_last: bool = True,
 ) -> Dict:
-    """Shared validation for create/load/resume/eval. Raises on failure."""
+    """Shared validation for create/load/resume/eval. Raises on failure.
+
+    Items are materialized in place: ``low``/``normal``/``ref`` become
+    ``read_root + rel`` and the hash is taken from those same relative paths.
+    """
     if not train_items:
         raise RuntimeError('train manifest is empty')
     if not val_items:
         raise RuntimeError('val manifest is empty')
+    train_items[:] = materialize_items(train_items, dataset_dir)
+    val_items[:] = materialize_items(val_items, dataset_dir)
 
     def _check_unique(items, name):
         ids = [x['id'] for x in items]
@@ -244,24 +347,26 @@ def validate_split_manifests(
         raise RuntimeError(
             'train/val id overlap: %s' % sorted(overlap)[:10])
 
-    # Path existence + unexpected path reuse across splits
+    # Every Low/GT/Ref file is owned by exactly one (role, id, field).
     path_owner = {}
     for split_name, items in (('train', train_items), ('val', val_items)):
         for it in items:
-            for key in ('low', 'normal', 'ref'):
+            for key in _PATH_KEYS:
                 p = os.path.normpath(it[key])
                 if not os.path.isfile(p):
                     raise FileNotFoundError(
                         '%s missing %s for id=%s path=%s'
                         % (split_name, key, it['id'], p))
-                # low paths uniquely owned; ref/normal may theoretically alias
-                # across cameras but for our LOLv2 layout must not cross splits
-                if key == 'low':
-                    if p in path_owner and path_owner[p] != split_name:
-                        raise RuntimeError(
-                            'Low path reused across splits: %s (%s vs %s)'
-                            % (p, path_owner[p], split_name))
-                    path_owner[p] = split_name
+                prev = path_owner.get(p)
+                if prev is not None and prev != (split_name, it['id'], key):
+                    raise RuntimeError(
+                        'Path reused (%s): %s is %s id=%s %s and %s id=%s %s'
+                        % (key, p, prev[0], prev[1], prev[2],
+                           split_name, it['id'], key))
+                path_owner[p] = (split_name, it['id'], key)
+            if os.path.normpath(it['ref']) == os.path.normpath(it['normal']):
+                raise RuntimeError(
+                    'GT path used as the reference for id=%s' % it['id'])
 
     if drop_last and len(train_items) < int(batch_size):
         raise RuntimeError(
@@ -279,8 +384,29 @@ def validate_split_manifests(
         'val_hash': val_hash,
         'manifest_hash_version': MANIFEST_HASH_VERSION,
         'ref_subdir': ref_subdir,
+        'reference_source': REFERENCE_SOURCE,
         'dataset_dir': os.path.normpath(dataset_dir),
+        'source_partition': 'Train',
     }
+
+
+def assert_split_identity(live: Dict, saved: Dict, context: str) -> None:
+    """One check for resume and for an independent internal-val eval.
+
+    Does not re-split and does not rewrite the checkpoint hash.
+    """
+    if not isinstance(saved, dict):
+        raise RuntimeError('%s: checkpoint has no split_identity' % context)
+    bad = []
+    for key in SPLIT_IDENTITY_FIELDS:
+        if saved.get(key) != live.get(key):
+            bad.append('%s: checkpoint=%r live=%r'
+                       % (key, saved.get(key), live.get(key)))
+    if bad:
+        raise RuntimeError(
+            '%s split identity mismatch. Refusing to treat this manifest as '
+            'the checkpoint\'s internal val, to re-split, or to update the '
+            'checkpoint.\n%s' % (context, '\n'.join(bad)))
 
 
 def write_coverage_manifests(
@@ -292,18 +418,23 @@ def write_coverage_manifests(
     allow_partial: bool = True,
 ) -> Dict:
     os.makedirs(out_dir, exist_ok=True)
-    try:
-        ok, missing = collect_triplets(
-            dataset_dir, split, subset=subset, ref_subdir=ref_subdir,
-            require_all=not allow_partial)
-    except RuntimeError:
-        ok, missing = collect_triplets(
-            dataset_dir, split, subset=subset, ref_subdir=ref_subdir,
-            require_all=False)
+    # Missing references are the only gap this mode drops. Missing GT,
+    # ambiguous ids and bad directories still raise from collect_triplets.
+    ok, missing = collect_triplets(
+        dataset_dir, split, subset=subset, ref_subdir=ref_subdir,
+        require_all=not allow_partial)
     include_path = os.path.join(out_dir, 'train_include_manifest.json')
     exclude_path = os.path.join(out_dir, 'train_exclude_missing_ref.json')
     with open(include_path, 'w') as f:
-        json.dump({'count': len(ok), 'items': ok}, f, indent=2)
+        json.dump({
+            'count': len(ok),
+            'items': ok,
+            'dataset_dir': os.path.normpath(dataset_dir),
+            'ref_subdir': ref_subdir,
+            'reference_source': REFERENCE_SOURCE,
+            'source_split': split,
+            'manifest_hash_version': MANIFEST_HASH_VERSION,
+        }, f, indent=2)
     with open(exclude_path, 'w') as f:
         json.dump({
             'count': len(missing),
