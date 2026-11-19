@@ -3,8 +3,12 @@
 Engineering baseline for the CSFI-U-Net Stage-A port on LOLv2-Real with
 **generated Nano references**. Reproducible start point — not a performance claim.
 
-**Checkpoint schema:** `checkpoint_schema_version = 2` (amend-2).  
-Schema-1 / incomplete packs are **rejected** on resume (no warm-start fallback).
+**Checkpoint schema:** `checkpoint_schema_version = 3` (LFCA; adds a top-level
+`model_variant` and the restoration-block identity to `config`). Schema 2 was
+amend-2 (IGAB variant).  
+Older / incomplete / other-variant packs are **rejected** on resume (no
+warm-start fallback). See `docs/BLOCK_AMEND_LFCA.md` for the current model
+identity (`csfi_lfca_v1`) and commands.
 
 ## What is implemented
 
@@ -20,11 +24,12 @@ Schema-1 / incomplete packs are **rejected** on resume (no warm-start fallback).
 | Checkpoint | Atomic `tmp_ckpt_*.pt` → `os.replace`; validate → update best → save best (if improved) → save last |
 | Resume | Restores model/opt/sched/RNG/loader generators; locks split identity & config |
 
-## Fixed training recipe (unchanged this round)
+## Fixed training recipe (unchanged by the LFCA replacement)
 
 ```
 backbone=csfi_unet  num_res_blocks=8+8+4+2  n_feats=64
-igab_blocks=1,1  enable_lightup=True
+model_variant=csfi_lfca_v1  restoration_block=lfca
+restoration_blocks=1,1  restoration_heads=1  enable_lightup=True
 use_global_illum=False  use_ref_illum=False
 ref_correction=True  freeze_lte=True  freeze_stages=""
 query_illum_align=False  texture_fusion=False
@@ -36,9 +41,9 @@ seed=42  val_ratio=0.1  split_seed=42
 ref_degrade=False
 ```
 
-## Checkpoint pack (schema 2)
+## Checkpoint pack (schema 3)
 
-Required fields: `checkpoint_schema_version`, `model_state_dict`,
+Required fields: `checkpoint_schema_version`, `model_variant`, `model_state_dict`,
 `optimizer_state_dict`, `scheduler_state_dict`, `epoch`, `global_step`,
 `best_val_psnr`, `best_epoch`, `validation_completed`, `config` (full resolved),
 `metric_protocol`, `init_scope`, `run_id`, `split_identity`, `rng`
@@ -56,8 +61,9 @@ Missing split manifests or hash mismatch → hard fail (no re-split).
 **Eval:** builds model from checkpoint `config` when present; bare weights
 require explicit architecture CLI (no silent defaults).
 
-**Compatibility:** schema 2 only. Older incomplete checkpoints cannot resume
-equivalently; do not auto-convert.
+**Compatibility:** schema 3 / `csfi_lfca_v1` only. Older incomplete checkpoints
+and IGAB-variant (schema 2) checkpoints cannot resume or be evaluated here; do
+not auto-convert.
 
 ## Manifest identity (v2)
 

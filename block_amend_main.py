@@ -36,6 +36,10 @@ from dataset.block_amend_lolv2 import (
     MANIFEST_HASH_VERSION,
 )
 from model.TTSREnhance import TTSREnhance
+from model.restoration_config import (
+    MODEL_VARIANT, RESTORATION_DEFAULTS, reject_legacy_igab_state,
+    require_model_variant, resolve_restoration_aliases,
+)
 from model.weight_init import apply_init_mode, load_strict_state, log_param_groups
 from model.tiled_infer import tiled_forward
 from utils_metrics_block_amend import (
@@ -50,8 +54,9 @@ BASELINE_FIXED = dict(
     num_res_blocks='8+8+4+2',
     n_feats=64,
     res_scale=1.0,
-    igab_blocks='1,1',
-    igab_heads=1,
+    # model identity: csfi_lfca_v1 / lfca / depth 1,1 / heads 1 / FFN x4 /
+    # binomial 5x5 low-pass (see model/restoration_config.py)
+    **RESTORATION_DEFAULTS,
     enable_lightup=True,
     use_global_illum=False,
     use_ref_illum=False,
@@ -167,6 +172,19 @@ def build_parser():
     p.add_argument('--log_file_name', type=str, default='block_amend.log')
     p.add_argument('--persistent_workers', action='store_true',
                    help='Not supported for epoch-aware aug; will error if set')
+    # Model identity. None = baseline default (see RESTORATION_DEFAULTS).
+    p.add_argument('--model_variant', type=str, default=None,
+                   help='Asserted model identity; this code only builds %s'
+                        % MODEL_VARIANT)
+    p.add_argument('--restoration_blocks', type=str, default=None,
+                   help='Restoration block depth coarse(H/4),middle(H/2); '
+                        'baseline 1,1')
+    p.add_argument('--restoration_heads', type=int, default=None,
+                   help='Restoration block heads; baseline 1')
+    p.add_argument('--igab_blocks', type=str, default=None,
+                   help='DEPRECATED alias of --restoration_blocks')
+    p.add_argument('--igab_heads', type=int, default=None,
+                   help='DEPRECATED alias of --restoration_heads')
     return p
 
 
@@ -367,7 +385,12 @@ def evaluate_loader(model, loader, args, device, save_dir=None, tag='val',
 def save_run_meta_fresh(args, root, identity, model, run_id, extra=None):
     wrap = model.module if hasattr(model, 'module') else model
     n_params = sum(p.numel() for p in wrap.parameters())
+    identity_fn = getattr(wrap.MainNet, 'restoration_identity', None)
     meta = {
+        'model_variant': getattr(args, 'model_variant', None),
+        'restoration': identity_fn() if identity_fn else None,
+        'n_params_mainnet_trainable': int(sum(
+            p.numel() for p in wrap.MainNet.parameters() if p.requires_grad)),
         'created_at': datetime.utcnow().isoformat() + 'Z',
         'run_id': run_id,
         'git': _git_info(root),
@@ -528,6 +551,13 @@ def main(argv=None):
     parser = build_parser()
     cli = parser.parse_args(argv)
     root = os.path.dirname(os.path.abspath(__file__))
+    # Neutral restoration names on the CLI namespace; deprecated igab_* aliases
+    # warn, conflict with an explicit neutral option is an error, and an
+    # explicit alias counts as an explicit neutral option for resume locking.
+    try:
+        resolve_restoration_aliases(cli, explicit)
+    except ValueError as e:
+        raise SystemExit(str(e))
 
     if cli.run_name:
         cli.save_dir = os.path.join(cli.save_dir, cli.run_name)
@@ -539,7 +569,7 @@ def main(argv=None):
         if not cli.resume_checkpoint:
             raise SystemExit('resume requires --resume_checkpoint')
         raw = torch.load(cli.resume_checkpoint, map_location='cpu')
-        require_resume_fields(raw)
+        require_resume_fields(raw, cli.resume_checkpoint)
         args, applied = merge_resume_config(
             raw['config'], cli, explicit, BASELINE_FIXED)
         args.resume_checkpoint = cli.resume_checkpoint
@@ -556,6 +586,9 @@ def main(argv=None):
             raise SystemExit('eval requires --model_path')
         raw = torch.load(cli.model_path, map_location='cpu')
         if isinstance(raw, dict) and 'config' in raw and 'model_state_dict' in raw:
+            # Eval rebuilds the model from the checkpoint config; refuse packs
+            # of another model_variant (e.g. IGAB) before building anything.
+            require_model_variant(raw, cli.model_path)
             args, applied = merge_resume_config(
                 raw['config'], cli, explicit, BASELINE_FIXED)
             args.model_path = cli.model_path
@@ -565,7 +598,13 @@ def main(argv=None):
             args.save_dir = cli.save_dir
             os.makedirs(args.save_dir, exist_ok=True)
         else:
-            # Bare weights: require explicit locked config on CLI
+            # Bare weights. IGAB-variant weights are refused outright (the
+            # model_variant differs), before any config question is asked.
+            if isinstance(raw, dict):
+                _sd = raw.get('model_state_dict', raw)
+                if isinstance(_sd, dict):
+                    reject_legacy_igab_state(_sd.keys(), cli.model_path)
+            # Otherwise: require explicit locked config on CLI
             missing = [k for k in ('backbone', 'num_res_blocks', 'n_feats',
                                    'enable_lightup', 'stage_mode_lv2')
                        if k not in explicit]
@@ -589,6 +628,12 @@ def main(argv=None):
     logger = Logger(
         os.path.join(args.save_dir, args.log_file_name),
         getattr(args, 'logger_name', 'block_amend')).get_log()
+    logger.info(
+        'Model identity: model_variant=%s restoration_block=%s blocks=%s '
+        'heads=%s ffn_expansion=%s lowpass=%s%s'
+        % (args.model_variant, args.restoration_block, args.restoration_blocks,
+           args.restoration_heads, args.restoration_ffn_expansion,
+           args.lowpass_kernel, args.lowpass_kernel_size))
 
     # Seed only for fresh/preflight before any RNG capture; resume restores later.
     if args.mode in ('train', 'preflight', 'eval') and int(args.seed) >= 0:
@@ -672,7 +717,7 @@ def main(argv=None):
 
     if args.mode == 'resume':
         raw = torch.load(args.resume_checkpoint, map_location=device)
-        require_resume_fields(raw)
+        require_resume_fields(raw, args.resume_checkpoint)
         # Split identity must match
         ckpt_id = raw['split_identity']
         for key in ('train_hash', 'val_hash', 'ref_subdir'):

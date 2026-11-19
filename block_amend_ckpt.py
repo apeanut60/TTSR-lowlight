@@ -8,12 +8,19 @@ from typing import Any, Dict, Optional, Set
 
 import torch
 
-CHECKPOINT_SCHEMA_VERSION = 2
+from model.restoration_config import (
+    MODEL_VARIANT, RESTORATION_CONFIG_KEYS, require_model_variant,
+)
+
+# v3: packs carry a top-level ``model_variant`` (csfi_lfca_v1) and the
+# restoration-block identity in ``config``. v2 packs are the IGAB variant.
+CHECKPOINT_SCHEMA_VERSION = 3
 
 # Keys that must match between CLI resume and checkpoint (protocol lock).
 LOCKED_CONFIG_KEYS = (
     'backbone', 'num_res_blocks', 'n_feats', 'res_scale',
-    'igab_blocks', 'igab_heads', 'enable_lightup',
+) + RESTORATION_CONFIG_KEYS + (
+    'enable_lightup',
     'use_global_illum', 'use_ref_illum', 'ref_correction',
     'freeze_lte', 'freeze_stages',
     'query_illum_align', 'texture_fusion',
@@ -155,8 +162,19 @@ def build_checkpoint_pack(
         k.replace('module.', ''): v.detach().cpu()
         for k, v in model.state_dict().items() if '_copy' not in k
     }
+    config = resolved_config_from_args(args)
+    missing_id = [k for k in RESTORATION_CONFIG_KEYS if k not in config]
+    if missing_id:
+        raise RuntimeError(
+            'Refusing to write a checkpoint without model identity; args lack %s'
+            % missing_id)
+    if config['model_variant'] != MODEL_VARIANT:
+        raise RuntimeError(
+            'args.model_variant=%r but this code builds %r'
+            % (config['model_variant'], MODEL_VARIANT))
     return {
         'checkpoint_schema_version': CHECKPOINT_SCHEMA_VERSION,
+        'model_variant': config['model_variant'],
         'model_state_dict': model_sd,
         'optimizer_state_dict': opt.state_dict(),
         'scheduler_state_dict': sched.state_dict(),
@@ -165,7 +183,7 @@ def build_checkpoint_pack(
         'best_val_psnr': float(best_val_psnr),
         'best_epoch': int(best_epoch),
         'validation_completed': bool(validation_completed),
-        'config': resolved_config_from_args(args),
+        'config': config,
         'metric_protocol': metric_protocol,
         'init_scope': init_scope,
         'init_checkpoint': init_checkpoint or '',
@@ -175,9 +193,12 @@ def build_checkpoint_pack(
     }
 
 
-def require_resume_fields(raw: Dict) -> None:
+def require_resume_fields(raw: Dict, path: str = '') -> None:
+    # Model identity first: an IGAB-variant pack must be told *why* it is
+    # refused, not just that its schema is old.
+    require_model_variant(raw, path)
     required = [
-        'checkpoint_schema_version', 'model_state_dict',
+        'checkpoint_schema_version', 'model_variant', 'model_state_dict',
         'optimizer_state_dict', 'scheduler_state_dict',
         'epoch', 'global_step', 'best_val_psnr', 'best_epoch',
         'config', 'split_identity', 'rng', 'metric_protocol',
@@ -242,6 +263,12 @@ def merge_resume_config(
         if hasattr(cli_ns, key):
             merged[key] = getattr(cli_ns, key)
             applied[key] = getattr(cli_ns, key)
+    # Runtime-only options that are neither in the checkpoint config nor in the
+    # fixed baseline (log_file_name, cpu, num_gpu, split_dir, ...) take their
+    # CLI value/default. Fill-only: never replaces a checkpoint/baseline value.
+    for key, value in vars(cli_ns).items():
+        if key not in merged:
+            merged[key] = value
     # Carry mode from CLI
     if hasattr(cli_ns, 'mode'):
         merged['mode'] = cli_ns.mode

@@ -44,7 +44,10 @@ def _patch_lte():
 def _tiny_args(**kw):
     d = dict(
         backbone='csfi_unet', num_res_blocks='1+1+1+1', n_feats=16,
-        res_scale=1.0, igab_blocks='1,1', igab_heads=1, enable_lightup=True,
+        res_scale=1.0, model_variant='csfi_lfca_v1', restoration_block='lfca',
+        restoration_blocks='1,1', restoration_heads=1,
+        restoration_ffn_expansion=4, lowpass_kernel='binomial',
+        lowpass_kernel_size=5, enable_lightup=True,
         use_global_illum=False, use_ref_illum=False, freeze_lte=True,
         ref_correction=True, ref_correction_feats=4, ref_illum_pool=8,
         freeze_stages='', query_illum_align=False, query_illum_alpha=0.0,
@@ -334,8 +337,17 @@ def test_last_best_bookkeeping():
 # ---- 6. resume rejects missing split / incomplete pack ----
 def test_resume_rejects():
     from block_amend_ckpt import require_resume_fields
+    # Model identity is checked first (schema v3): a pack that declares no
+    # model_variant is refused for that reason...
     try:
         require_resume_fields({'model_state_dict': {}})
+        assert False
+    except RuntimeError as e:
+        assert 'model_variant' in str(e)
+    # ...and a pack of the right variant with missing fields is "Incomplete".
+    try:
+        require_resume_fields(
+            {'model_variant': 'csfi_lfca_v1', 'model_state_dict': {}})
         assert False
     except RuntimeError as e:
         assert 'Incomplete' in str(e)

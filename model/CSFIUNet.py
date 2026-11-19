@@ -1,8 +1,14 @@
 """CSFI-U-Net Stage-A backbone for TTSREnhance (block-amend).
 
-Cross-scale restore with IlluminationEstimator / IGAB / soft reference inject.
-Copied and simplified from ASRT Stage-A; does not import the ASRT package.
-v3 / v4 / vNext modules are intentionally omitted.
+Cross-scale restore with IlluminationEstimator light-up base / LFCA restoration
+blocks / soft reference inject. Skeleton copied and simplified from ASRT
+Stage-A; does not import the ASRT package. v3 / v4 / vNext modules are
+intentionally omitted.
+
+model_variant ``csfi_lfca_v1``: the two restoration positions (coarse H/4,
+middle H/2) use LFCA (``model/frequency_mixer.py``) and take the feature only.
+The IlluminationEstimator now feeds only the pixel-domain light-up base; its
+feature map is no longer routed into the restoration blocks.
 """
 from __future__ import annotations
 
@@ -13,8 +19,12 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from model.igab import IGAB, IlluminationEstimator
+from model.frequency_mixer import (
+    LFCA, LOWPASS_KERNEL_SIZE, LOWPASS_KERNEL_TYPE,
+)
+from model.illumination import IlluminationEstimator
 from model.MainNetEnhance import GlobalIllumHead, RefIllumTransfer
+from model.restoration_config import MODEL_VARIANT, parse_restoration_blocks
 
 
 def conv1x1(in_ch, out_ch, stride=1):
@@ -159,15 +169,19 @@ def _normalize_stage_mode(mode):
 
 
 class CSFIUNet(nn.Module):
-    """Cross-scale CSFI U-Net with IGAB (Stage-A). Drop-in for MainNetEnhance."""
+    """Cross-scale CSFI U-Net with LFCA blocks. Drop-in for MainNetEnhance."""
+
+    model_variant = MODEL_VARIANT
 
     def __init__(
         self,
         num_res_blocks='8+8+4+2',
         n_feats=64,
         res_scale=1.,
-        igab_blocks=(1, 1),
-        igab_heads=1,
+        restoration_block='lfca',
+        restoration_blocks=(1, 1),
+        restoration_heads=1,
+        restoration_ffn_expansion=4,
         enable_lightup=True,
         use_global_illum=False,
         use_ref_illum=False,
@@ -175,14 +189,21 @@ class CSFIUNet(nn.Module):
     ):
         super().__init__()
         blocks = parse_num_res_blocks(num_res_blocks)
-        if isinstance(igab_blocks, str):
-            parts = [int(x) for x in igab_blocks.replace(' ', '').split(',')]
-            if len(parts) == 1:
-                igab_blocks = (parts[0], parts[0])
-            else:
-                igab_blocks = (parts[0], parts[1])
-        if n_feats % igab_heads:
-            raise ValueError('n_feats must be divisible by igab_heads')
+        if str(restoration_block).strip().lower() != 'lfca':
+            raise ValueError(
+                'CSFIUNet (%s) only builds restoration_block="lfca", got %r'
+                % (MODEL_VARIANT, restoration_block))
+        depth_coarse, depth_middle = parse_restoration_blocks(restoration_blocks)
+        restoration_heads = int(restoration_heads)
+        restoration_ffn_expansion = int(restoration_ffn_expansion)
+        if restoration_heads < 1 or n_feats % restoration_heads:
+            raise ValueError(
+                'n_feats=%d must be divisible by restoration_heads=%d'
+                % (n_feats, restoration_heads))
+        self.restoration_block = 'lfca'
+        self.restoration_depths = (depth_coarse, depth_middle)
+        self.restoration_heads = restoration_heads
+        self.restoration_ffn_expansion = restoration_ffn_expansion
         self.num_res_blocks = blocks
         self.n_feats = n_feats
         self.enable_lightup = bool(enable_lightup)
@@ -232,10 +253,12 @@ class CSFIUNet(nn.Module):
                 head.weight.mul_(0.01)
 
         self.illumination_estimator = IlluminationEstimator(n_feats)
-        self.coarse_igab = IGAB(
-            n_feats, num_blocks=int(igab_blocks[0]), heads=igab_heads)
-        self.middle_igab = IGAB(
-            n_feats, num_blocks=int(igab_blocks[1]), heads=igab_heads)
+        self.coarse_freq_block = LFCA(
+            n_feats, num_blocks=depth_coarse, heads=restoration_heads,
+            ffn_expansion=restoration_ffn_expansion)
+        self.middle_freq_block = LFCA(
+            n_feats, num_blocks=depth_middle, heads=restoration_heads,
+            ffn_expansion=restoration_ffn_expansion)
         self.merge_tail = MergeTail(n_feats)
         self.global_illum_head = GlobalIllumHead()
         self.ref_illum = RefIllumTransfer(pool=ref_illum_pool)
@@ -279,14 +302,31 @@ class CSFIUNet(nn.Module):
             feat = rb(feat)
         return start + tail(feat)
 
+    def restoration_identity(self) -> dict:
+        """What sits at the two restoration positions (for run metadata)."""
+        return dict(
+            model_variant=self.model_variant,
+            restoration_block=self.restoration_block,
+            coarse_depth=self.restoration_depths[0],
+            middle_depth=self.restoration_depths[1],
+            heads=self.restoration_heads,
+            ffn_expansion=self.restoration_ffn_expansion,
+            lowpass_kernel=LOWPASS_KERNEL_TYPE,
+            lowpass_kernel_size=LOWPASS_KERNEL_SIZE,
+        )
+
     def encode_low_stem(self, x):
-        """Pad + illum + SFE + downs."""
+        """Pad + light-up base + SFE + downs.
+
+        The estimator's feature map is only an internal of the log_gain
+        readout; it is not part of the stem (LFCA blocks take features only).
+        """
         orig_hw = x.shape[-2:]
         th = int(math.ceil(orig_hw[0] / 4.0) * 4)
         tw = int(math.ceil(orig_hw[1] / 4.0) * 4)
         low = self.safe_pad(x, (th, tw))
         low01 = (low + 1.) * 0.5
-        illu_h, log_gain = self.illumination_estimator(low01)
+        _, log_gain = self.illumination_estimator(low01)
         if self.enable_lightup:
             lightup = low01 * torch.exp(log_gain.clamp(-1.5, 1.5))
             base = 2. * lightup - 1.
@@ -295,12 +335,9 @@ class CSFIUNet(nn.Module):
         e0 = self.SFE(low)
         e1 = self.down1(e0)
         e2 = self.down2(e1)
-        illu_h2 = resize_like(illu_h, e1)
-        illu_h4 = resize_like(illu_h, e2)
         return dict(
             low=low, low01=low01, base=base, orig_hw=orig_hw,
             e0=e0, e1=e1, e2=e2,
-            illu_h=illu_h, illu_h2=illu_h2, illu_h4=illu_h4,
             log_gain=log_gain,
         )
 
@@ -406,9 +443,6 @@ class CSFIUNet(nn.Module):
             base=c(stem['base'], y0, y1, x0, x1),
             orig_hw=(y1 - y0, x1 - x0),
             e0=e0, e1=e1, e2=e2,
-            illu_h=c(stem['illu_h'], y0, y1, x0, x1),
-            illu_h2=c(stem['illu_h2'], y0 // 2, y1 // 2, x0 // 2, x1 // 2),
-            illu_h4=c(stem['illu_h4'], y0 // 4, y1 // 4, x0 // 4, x1 // 4),
             log_gain=c(stem['log_gain'], y0, y1, x0, x1),
         )
 
@@ -464,7 +498,6 @@ class CSFIUNet(nn.Module):
         base = stem['base']
         orig_hw = stem['orig_hw']
         e0, e1, e2 = stem['e0'], stem['e1'], stem['e2']
-        illu_h2, illu_h4 = stem['illu_h2'], stem['illu_h4']
         low = stem['low']
 
         gate_e0 = self._maybe_counterfactual_gate(
@@ -472,15 +505,15 @@ class CSFIUNet(nn.Module):
             gate_smooth_kernel=gate_smooth_kernel,
             collect_gate_stats=collect_gate_stats)
 
-        # Coarse @ H/4: inject T_lv3 → RB → IGAB
+        # Coarse @ H/4: inject T_lv3 → RB → LFCA
         x11, res11 = self._inject(
             e2, T_lv3, S, self.conv11_head, use_reference,
             stage_mode=stage_mode_lv3,
             gate=None if gate_e0 is None else resize_like(gate_e0, e2))
         x11 = self._run_rbs(x11, self.RB11, self.conv11_tail)
-        x11 = self.coarse_igab(x11, illu_h4)
+        x11 = self.coarse_freq_block(x11)
 
-        # Middle @ H/2: skip + inject T_lv2 → CSFI2 → RB → IGAB
+        # Middle @ H/2: skip + inject T_lv2 → CSFI2 → RB → LFCA
         x21 = x11
         x22 = self.skip_e1(torch.cat([resize_like(x11, e1), e1], dim=1))
         x22, res22 = self._inject(
@@ -490,9 +523,9 @@ class CSFIUNet(nn.Module):
         x21, x22 = self.ex12(x21, x22)
         x21 = self._run_rbs(x21, self.RB21, self.conv21_tail)
         x22 = self._run_rbs(x22, self.RB22, self.conv22_tail)
-        x22 = self.middle_igab(x22, illu_h2)
+        x22 = self.middle_freq_block(x22)
 
-        # Fine @ H: skip + inject T_lv1 → CSFI3 → RB (no IGAB)
+        # Fine @ H: skip + inject T_lv1 → CSFI3 → RB (no attention block)
         x31, x32 = x21, x22
         x33 = self.skip_e0(torch.cat([resize_like(x22, e0), e0], dim=1))
         x33, res33 = self._inject(

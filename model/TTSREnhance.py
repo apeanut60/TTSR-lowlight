@@ -10,6 +10,9 @@ Key differences from TTSR:
 from model import MainNetEnhance, LTE, SearchTransfer
 from model.CSFIUNet import CSFIUNet
 from model.query_illum_align import align_query_illumination
+from model.restoration_config import (
+    reject_legacy_igab_state, restoration_config_from_args,
+)
 
 import math
 import torch
@@ -72,13 +75,18 @@ class TTSREnhance(nn.Module):
         backbone = str(getattr(args, 'backbone', 'csfi_unet')).strip().lower()
         self.backbone_name = backbone
         if backbone in ('csfi_unet', 'csfi', 'asrt'):
-            igab_blocks = getattr(args, 'igab_blocks', '1,1')
+            # Neutral names; deprecated igab_* aliases warn / conflict-check.
+            # Rejects any model_variant other than the one this code builds.
+            rcfg = restoration_config_from_args(args)
+            self.model_variant = rcfg['model_variant']
             self.MainNet = CSFIUNet(
                 num_res_blocks=args.num_res_blocks,
                 n_feats=args.n_feats,
                 res_scale=args.res_scale,
-                igab_blocks=igab_blocks,
-                igab_heads=int(getattr(args, 'igab_heads', 1)),
+                restoration_block=rcfg['restoration_block'],
+                restoration_blocks=rcfg['restoration_blocks'],
+                restoration_heads=rcfg['restoration_heads'],
+                restoration_ffn_expansion=rcfg['restoration_ffn_expansion'],
                 enable_lightup=bool(getattr(args, 'enable_lightup', True)),
                 use_global_illum=bool(getattr(args, 'use_global_illum', False)),
                 use_ref_illum=bool(getattr(args, 'use_ref_illum', False)),
@@ -419,6 +427,9 @@ def load_pretrained_weights(model, pretrain_path, device='cuda',
     pretrained = torch.load(pretrain_path, map_location=device)
     if any(k.startswith('module.') for k in pretrained):
         pretrained = {k.replace('module.', '', 1): v for k, v in pretrained.items()}
+    if isinstance(getattr(model, 'MainNet', None), CSFIUNet):
+        # Never shape-filter an IGAB-variant checkpoint into the LFCA backbone.
+        reject_legacy_igab_state(pretrained.keys(), pretrain_path)
 
     model_state = model.state_dict()
     matched = 0

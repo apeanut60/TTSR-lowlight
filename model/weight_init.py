@@ -14,6 +14,8 @@ from typing import Any, Dict, Iterable, Optional, Tuple
 import torch
 import torch.nn as nn
 
+from model.restoration_config import reject_legacy_igab_state
+
 
 SUPPORTED_CONTAINERS = ('state_dict', 'model', 'model_state_dict', 'net')
 
@@ -184,6 +186,11 @@ def load_strict_state(model: nn.Module, checkpoint_path: str, device='cpu',
             state = unwrap_checkpoint(raw, checkpoint_path)
     else:
         state = unwrap_checkpoint(raw, checkpoint_path)
+
+    # An IGAB-variant state can never be (even partially) loaded into LFCA.
+    _wrap = model.module if hasattr(model, 'module') else model
+    if type(getattr(_wrap, 'MainNet', None)).__name__ == 'CSFIUNet':
+        reject_legacy_igab_state(state.keys(), checkpoint_path)
 
     # Drop LTE_copy from required keys if absent in ckpt.
     model_state = model.state_dict()

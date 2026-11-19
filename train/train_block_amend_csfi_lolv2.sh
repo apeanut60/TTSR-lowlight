@@ -1,12 +1,16 @@
 #!/bin/bash
-# block-amend CSFI-U-Net Stage-A baseline on LOLv2-Real (generated Nano refs).
+# block-amend CSFI-U-Net on LOLv2-Real (generated Nano refs).
+# Model identity: csfi_lfca_v1 (LFCA restoration blocks at coarse H/4 and
+# middle H/2; depth 1,1; heads 1). Recipe/data protocol unchanged from the
+# IGAB baseline. IGAB-variant checkpoints cannot be resumed/evaluated here.
 # Default: fresh init (code MainNet + ImageNet LTE, frozen). No silent P2 load.
 # No --reset. Non-empty save_dir is rejected by block_amend_main.py.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 DATA="${DATA:-/root/data/datasets/lol-v2-real}"
-RUN_NAME="${RUN_NAME:-csfi_lolv2_$(date +%Y%m%d_%H%M%S)}"
+MODEL_VARIANT="csfi_lfca_v1"
+RUN_NAME="${RUN_NAME:-${MODEL_VARIANT}_lolv2_$(date +%Y%m%d_%H%M%S)}"
 SAVE_ROOT="${SAVE_ROOT:-/root/data/experiments/TTSR-lowlight-block-amend}"
 SAVE_DIR="${SAVE_DIR:-$SAVE_ROOT/$RUN_NAME}"
 TRAIN_REF="${TRAIN_REF:-nanobanana_ref_v2}"
@@ -16,9 +20,10 @@ INIT_SCOPE="${INIT_SCOPE:-fresh}"
 INIT_CHECKPOINT="${INIT_CHECKPOINT:-}"
 
 echo "============================================"
-echo " block-amend CSFI Stage-A baseline"
+echo " block-amend CSFI-U-Net ($MODEL_VARIANT)"
 echo " mode=train  init_scope=$INIT_SCOPE"
 echo " backbone=csfi_unet  num_res_blocks=8+8+4+2"
+echo " model_variant=$MODEL_VARIANT  restoration_block=lfca  blocks=1,1  heads=1"
 echo " data=$DATA  train_ref=$TRAIN_REF"
 echo " save_dir=$SAVE_DIR"
 echo " code=$ROOT"
@@ -44,6 +49,7 @@ fi
 
 python block_amend_main.py \
     --mode train \
+    --model_variant "$MODEL_VARIANT" \
     --dataset_dir "$DATA" \
     --train_ref_subdir "$TRAIN_REF" \
     --test_ref_subdir "$TEST_REF" \

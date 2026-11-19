@@ -67,7 +67,7 @@ def build_args():
         eval_degrade_seed=1234, enhance_mode=True,
         backbone='mainnet',
         num_res_blocks='10+10+6+4', n_feats=64, res_scale=1.0,
-        igab_blocks='1,1', igab_heads=1, enable_lightup=True,
+        restoration_blocks='1,1', restoration_heads=1, enable_lightup=True,
         use_global_illum=False, use_ref_illum=False,
         freeze_lte=False, ref_correction=True, ref_correction_feats=16,
         ref_illum_pool=8,

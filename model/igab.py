@@ -1,6 +1,11 @@
-"""Illumination estimator and IGAB (ASRT / RetinexFormer-style channel attention).
+"""Historical IGAB (ASRT / RetinexFormer-style illumination-guided channel attention).
 
-Ported into this repo for the block-amend CSFI-U-Net backbone. Does not import ASRT.
+Kept for reference and for parameter/behaviour comparisons only. The block-amend
+CSFI-U-Net (model_variant ``csfi_lfca_v1``) no longer instantiates or calls
+``IGAB`` / ``IG_MSA``; see ``model/frequency_mixer.py``. Does not import ASRT.
+
+``IlluminationEstimator`` moved to ``model/illumination.py`` (unchanged) and is
+re-exported here for old imports.
 """
 from __future__ import annotations
 
@@ -8,24 +13,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-
-class IlluminationEstimator(nn.Module):
-    """Predict illumination features + log_gain from Low in [0, 1]."""
-
-    def __init__(self, channels: int):
-        super().__init__()
-        self.conv1 = nn.Conv2d(4, channels, kernel_size=1, bias=True)
-        self.depth_conv = nn.Conv2d(
-            channels, channels, kernel_size=5, padding=2, groups=channels, bias=True)
-        self.conv2 = nn.Conv2d(channels, 3, kernel_size=1, bias=True)
-        nn.init.zeros_(self.conv2.weight)
-        nn.init.zeros_(self.conv2.bias)
-
-    def forward(self, low01: torch.Tensor):
-        mean_c = low01.mean(dim=1, keepdim=True)
-        f = self.depth_conv(self.conv1(torch.cat([low01, mean_c], dim=1)))
-        log_gain = self.conv2(f)
-        return f, log_gain
+from model.illumination import IlluminationEstimator  # noqa: F401  (compat re-export)
 
 
 class IG_MSA(nn.Module):

@@ -143,6 +143,12 @@ class Trainer():
         if (model_path):
             self.logger.info('load_model_path: ' + model_path)
             pretrained = torch.load(model_path, map_location=self.device)
+            # This loader is shape-filtered; never let it paint an IGAB-variant
+            # checkpoint into the LFCA backbone (model_variant differs).
+            _wrap = self.model.module if hasattr(self.model, 'module') else self.model
+            if type(getattr(_wrap, 'MainNet', None)).__name__ == 'CSFIUNet':
+                from model.restoration_config import reject_legacy_igab_state
+                reject_legacy_igab_state(pretrained.keys(), model_path)
             model_state_dict = self.model.state_dict()
 
             # Load only matching layers (support partial weight loading)

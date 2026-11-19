@@ -78,10 +78,20 @@ parser.add_argument('--n_feats', type=int, default=64,
                     help='The number of channels in network')
 parser.add_argument('--res_scale', type=float, default=1.,
                     help='Residual scale')
-parser.add_argument('--igab_blocks', type=str, default='1,1',
-                    help='IGAB depth at coarse(H/4),middle(H/2), e.g. 1,1')
-parser.add_argument('--igab_heads', type=int, default=1,
-                    help='IGAB attention heads (n_feats must be divisible)')
+parser.add_argument('--model_variant', type=str, default=None,
+                    help='CSFI-U-Net identity; this code only builds csfi_lfca_v1')
+parser.add_argument('--restoration_block', type=str, default=None,
+                    help='Restoration block at coarse(H/4)/middle(H/2): lfca')
+parser.add_argument('--restoration_blocks', type=str, default=None,
+                    help='Restoration block depth at coarse(H/4),middle(H/2) '
+                         '(default 1,1)')
+parser.add_argument('--restoration_heads', type=int, default=None,
+                    help='Restoration block attention heads (default 1; '
+                         'n_feats must be divisible)')
+parser.add_argument('--igab_blocks', type=str, default=None,
+                    help='DEPRECATED alias of --restoration_blocks')
+parser.add_argument('--igab_heads', type=int, default=None,
+                    help='DEPRECATED alias of --restoration_heads')
 parser.add_argument('--enable_lightup', type=str2bool, default=True,
                     help='CSFI-U-Net: IlluminationEstimator light-up residual base Y_base')
 parser.add_argument('--use_global_illum', type=str2bool, default=False,
@@ -332,3 +342,11 @@ parser.add_argument('--ref_path', type=str, default='./test/demo/ref/ref.png',
                     help='The path of ref image when testing')
 
 args = parser.parse_args()
+
+# Neutral restoration-block names; igab_* are deprecated aliases (warn, and
+# error if they disagree with an explicit neutral option).
+from model.restoration_config import resolve_restoration_aliases  # noqa: E402
+try:
+    resolve_restoration_aliases(args)
+except ValueError as _e:
+    parser.error(str(_e))

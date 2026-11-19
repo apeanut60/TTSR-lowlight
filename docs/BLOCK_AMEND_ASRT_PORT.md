@@ -2,6 +2,8 @@
 
 Port of ASRT **Stage-A** cross-scale CSFI-U-Net into `TTSR-lowlight-v1-data1SOTA`, keeping the TTSREnhance shell (LTE + SearchTransfer + optional RefCorrection / query-illum). Git is owned by the operator; this doc only describes the workspace changes.
 
+> **Superseded in part.** This describes the original port (IGAB at H/4 and H/2, up to commit `5777e63`). The two IGAB positions are now LFCA blocks (`model_variant=csfi_lfca_v1`), `IlluminationEstimator` lives in `model/illumination.py`, and `igab_blocks` / `igab_heads` are deprecated aliases of `restoration_blocks` / `restoration_heads`. See `docs/BLOCK_AMEND_LFCA.md`.
+
 ## What moved
 
 | Module | Path | Role |
