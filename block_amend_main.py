@@ -553,6 +553,11 @@ def train_loop(args, logger, model, opt, sched, train_loader, val_loader,
             atomic_torch_save(pack, best_path)
             logger.info('New best_val_psnr=%.4f best_epoch=%d' % (best_psnr, best_epoch))
         atomic_torch_save(pack, last_path)
+        if getattr(args, 'save_every_epoch', False):
+            ep_path = os.path.join(
+                args.save_dir, 'checkpoint_epoch_%04d.pt' % epoch)
+            atomic_torch_save(pack, ep_path)
+            logger.info('Saved epoch snapshot %s' % ep_path)
 
 
 def main(argv=None):
