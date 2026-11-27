@@ -196,6 +196,7 @@ class CSFIUNet(nn.Module):
         gain_attn_depth=1,
         gain_attn_ffn_expansion=2,
         gain_max_tokens=400,
+        gain_grid_policy='scaled_budget_v1',
     ):
         super().__init__()
         blocks = parse_num_res_blocks(num_res_blocks)
@@ -279,7 +280,8 @@ class CSFIUNet(nn.Module):
                 heads=int(gain_attn_heads),
                 attn_depth=int(gain_attn_depth),
                 ffn_expansion=int(gain_attn_ffn_expansion),
-                max_tokens=int(gain_max_tokens))
+                max_tokens=int(gain_max_tokens),
+                grid_policy=gain_grid_policy)
         else:
             raise ValueError(
                 'Unknown gain_estimator %r' % (gain_estimator,))

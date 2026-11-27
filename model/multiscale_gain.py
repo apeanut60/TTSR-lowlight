@@ -20,24 +20,25 @@ import torch.nn.functional as F
 from model.frequency_mixer import FixedBinomialLowPass
 
 GAIN_CLAMP = 1.5
+GRID_POLICY_LEGACY = 'legacy_aspect_first'
+GRID_POLICY_SCALED = 'scaled_budget_v1'
+GRID_POLICIES = (GRID_POLICY_LEGACY, GRID_POLICY_SCALED)
 
 
-def choose_token_grid(height, width, cap=400):
-    """Deterministic pool grid with ``ph * pw <= cap`` and ``ph <= height``.
+def _positive_int(name, value):
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError('%s must be a positive integer, got %r' % (name, value))
+    if value < 1:
+        raise ValueError('%s must be a positive integer, got %r' % (name, value))
+    return value
 
-    When the native grid already fits, it is returned unchanged (never
-    upsampled). Otherwise the grid keeps the aspect ratio as well as a
-    bounded search allows: smallest aspect error, then largest area, then
-    smaller ``ph``. A 1-pixel axis stays 1 and the other axis absorbs the cap.
+
+def _choose_token_grid_legacy(height, width, cap):
+    """Old rule: smallest aspect error, then largest area.
+
+    Kept so a checkpoint saved before ``gain_grid_policy`` can reproduce
+    its pooling grid. It can pick a tiny exact-ratio grid (22x20 -> 11x10).
     """
-    height = int(height)
-    width = int(width)
-    cap = int(cap)
-    if height < 1 or width < 1:
-        raise ValueError(
-            'token grid axes must be positive, got (%d, %d)' % (height, width))
-    if cap < 1:
-        raise ValueError('token cap must be positive, got %d' % cap)
     if height * width <= cap:
         return height, width
     target = height / float(width)
@@ -63,6 +64,82 @@ def choose_token_grid(height, width, cap=400):
                 best_key = key
                 best = (ph, pw)
     return best
+
+
+def _scaled_targets(height, width, cap):
+    scale = math.sqrt(cap / float(height * width))
+    target_h = height * scale
+    target_w = width * scale
+    if target_h < 1.0:
+        target_h = 1.0
+        target_w = float(min(width, cap))
+    if target_w < 1.0:
+        target_w = 1.0
+        target_h = float(min(height, cap))
+    return target_h, target_w
+
+
+def _choose_token_grid_scaled(height, width, cap):
+    """Integer grid nearest the continuous scale-to-budget target.
+
+    Distance is the sum of squared relative errors against that target.
+    Equal distance keeps the larger area, then the smaller ``ph``. Exact
+    aspect ratio is not the first key, so a factorable grid is not collapsed
+    just because a small divisor matches the ratio.
+    """
+    if height * width <= cap:
+        return height, width
+    target_h, target_w = _scaled_targets(height, width, cap)
+    best_key = None
+    best = (1, 1)
+    max_ph = min(height, cap)
+    max_pw = min(width, cap)
+    for ph in range(1, max_ph + 1):
+        room = cap // ph
+        if room < 1:
+            continue
+        pw_max = min(max_pw, room)
+        lo = max(1, int(math.floor(target_w)) - 1)
+        hi = min(pw_max, int(math.ceil(target_w)) + 1)
+        if lo > hi:
+            cands = (pw_max,)
+        else:
+            cands = range(lo, hi + 1)
+        for pw in cands:
+            if pw < 1 or pw > width or ph * pw > cap:
+                continue
+            dist = (((ph - target_h) / target_h) ** 2
+                    + ((pw - target_w) / target_w) ** 2)
+            key = (dist, -(ph * pw), ph, pw)
+            if best_key is None or key < best_key:
+                best_key = key
+                best = (ph, pw)
+    return best
+
+
+def choose_token_grid(height, width, cap=400, policy=GRID_POLICY_SCALED):
+    """Deterministic pool grid. Never upsamples. ``ph * pw <= cap``.
+
+    ``policy='scaled_budget_v1'`` is the fresh v2 rule.
+    ``policy='legacy_aspect_first'`` reproduces the previous aspect-first rule.
+    """
+    height = _positive_int('height', height)
+    width = _positive_int('width', width)
+    cap = _positive_int('cap', cap)
+    policy = str(policy).strip().lower()
+    if policy == GRID_POLICY_LEGACY:
+        grid = _choose_token_grid_legacy(height, width, cap)
+    elif policy == GRID_POLICY_SCALED:
+        grid = _choose_token_grid_scaled(height, width, cap)
+    else:
+        raise ValueError(
+            'gain_grid_policy must be one of %s, got %r' % (GRID_POLICIES, policy))
+    ph, pw = grid
+    if ph < 1 or pw < 1 or ph > height or pw > width or ph * pw > cap:
+        raise RuntimeError(
+            'token grid (%d,%d) is outside (%d,%d) cap %d' % (
+                ph, pw, height, width, cap))
+    return ph, pw
 
 
 def summarize_log_gain(log_gain, clamp=GAIN_CLAMP):
@@ -185,7 +262,8 @@ class MultiScaleSpatialGainEstimator(nn.Module):
             heads=4,
             attn_depth=1,
             ffn_expansion=2,
-            max_tokens=400):
+            max_tokens=400,
+            grid_policy=GRID_POLICY_SCALED):
         super().__init__()
         c4, c8 = int(channels[0]), int(channels[1])
         n4, n8, nf = (int(x) for x in res_blocks)
@@ -201,6 +279,12 @@ class MultiScaleSpatialGainEstimator(nn.Module):
         self.max_tokens = int(max_tokens)
         if self.max_tokens < 1:
             raise ValueError('max_tokens must be positive')
+        policy = str(grid_policy).strip().lower()
+        if policy not in GRID_POLICIES:
+            raise ValueError(
+                'gain_grid_policy must be one of %s, got %r' % (
+                    GRID_POLICIES, grid_policy))
+        self.grid_policy = policy
         self.down = BlurDown2()
         self.in_conv = nn.Conv2d(4, c4, 3, padding=1, bias=True)
         self.act = nn.GELU()
@@ -229,7 +313,7 @@ class MultiScaleSpatialGainEstimator(nn.Module):
     def context_delta(self, z8):
         """Return ``Z8_context``. No pool => exactly ``A(Z8)``."""
         h, w = int(z8.shape[-2]), int(z8.shape[-1])
-        ph, pw = choose_token_grid(h, w, self.max_tokens)
+        ph, pw = choose_token_grid(h, w, self.max_tokens, self.grid_policy)
         if ph > h or pw > w or ph * pw > self.max_tokens:
             raise RuntimeError(
                 'token grid (%d,%d) exceeds source (%d,%d) or cap %d'

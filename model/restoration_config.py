@@ -50,11 +50,15 @@ _V1_BEHAVIOR = dict(
     match_temperature=0.1,
     match_query_chunk_size=128,
     match_transfer_recompute=True,
+    # Unused by the local affine head. Recorded so the key exists.
+    gain_grid_policy='legacy_aspect_first',
     **_GAIN_ARCH,
 )
 
 # v2 defaults. Matching k / temperature / chunk may differ; the gain
-# architecture stays the fixed starting point.
+# architecture stays the fixed starting point. Fresh runs use the scaled
+# token grid. A pack that omits gain_grid_policy is legacy; see
+# apply_absent_grid_policy.
 _V2_BEHAVIOR = dict(
     gain_estimator='multiscale_spatial_v1',
     matching_mode='topk_soft',
@@ -62,8 +66,10 @@ _V2_BEHAVIOR = dict(
     match_temperature=0.1,
     match_query_chunk_size=128,
     match_transfer_recompute=True,
+    gain_grid_policy='scaled_budget_v1',
     **_GAIN_ARCH,
 )
+GRID_POLICIES = ('legacy_aspect_first', 'scaled_budget_v1')
 
 RESTORATION_DEFAULTS = dict(
     model_variant=MODEL_VARIANT,
@@ -220,7 +226,25 @@ def validate_restoration_config(cfg: Dict[str, Any]) -> Dict[str, Any]:
             raise ValueError('match_query_chunk_size must be >= 1')
         if not isinstance(out['match_transfer_recompute'], bool):
             raise ValueError('match_transfer_recompute must be a boolean')
+        if out['gain_grid_policy'] not in GRID_POLICIES:
+            raise ValueError(
+                'gain_grid_policy must be one of %s, got %r' % (
+                    GRID_POLICIES, out['gain_grid_policy']))
     return out
+
+
+def apply_absent_grid_policy(merged: Dict, ckpt_config: Dict) -> None:
+    """Old v2 packs have no gain_grid_policy. That means the aspect-first grid.
+
+    Called after the checkpoint is copied onto the baseline, so a newer
+    baseline default cannot replace the missing field.
+    """
+    variant = str(merged.get('model_variant', '')).strip().lower()
+    if variant != MODEL_VARIANT_V2:
+        return
+    recorded = ckpt_config.get('gain_grid_policy', None)
+    if recorded is None or recorded == '':
+        merged['gain_grid_policy'] = 'legacy_aspect_first'
 
 
 def restoration_config_from_args(args) -> Dict[str, Any]:

@@ -75,7 +75,26 @@ log_gain = bilinear(g4 → low01 的 H,W)
 
 所有 bilinear 都是 `align_corners=False`，目标边长用张量的实际形状。
 
-最粗尺度是真正的空间 attention，不是 LFCA 的通道 attention。`Z8` 为 `[B,64,h8,w8]`。`h8*w8 <= 400` 时用原网格，不放大。否则在 `ph<=h8`、`pw<=w8`、`ph*pw<=400` 里按长宽比选一个确定网格，极端长条和单像素轴也守住 400。然后：
+最粗尺度是真正的空间 attention，不是 LFCA 的通道 attention。`Z8` 为 `[B,64,h8,w8]`。`h8*w8 <= 400` 时用原网格，不放大。否则在 `ph<=h8`、`pw<=w8`、`ph*pw<=400` 里选一个确定的整数网格，token 上限仍是 400，不靠降低上限来省显存。
+
+新规则 `gain_grid_policy=scaled_budget_v1` 先算连续目标 `s = sqrt(cap/(h*w))`，短轴目标小于 1 时把短轴钉在 1、长轴用满 `min(边长, cap)`。整数网格最小化相对这个目标的距离，距离相同再取较大面积。精确长宽比不再排在第一位，所以可约分的网格不会被压成一张很小的注意力图。
+
+旧规则 `legacy_aspect_first` 仍保留：先最小长宽比误差，再最大面积。它会把 22×20 收成 11×10。只给没有 `gain_grid_policy` 字段的历史 v2 checkpoint 复现用。
+
+同一输入、cap=400 的实际网格：
+
+| 原粗网格 | 旧池化网格 | 旧 token | 新池化网格 | 新 token |
+| --- | --- | --- | --- | --- |
+| 20×20 | 20×20 | 400 | 20×20 | 400 |
+| 22×20 | 11×10 | 110 | 21×19 | 399 |
+| 22×21 | 20×19 | 380 | 20×20 | 400 |
+| 44×40 | 11×10 | 110 | 21×19 | 399 |
+| 64×60 | 16×15 | 240 | 21×19 | 399 |
+| 30×30 | 20×20 | 400 | 20×20 | 400 |
+
+转置与上表对称。20～24 附近超过 400 的格子，新规则的 token 数都在 396 以上，没有因为某个比例恰好可约分而掉到一百多个 token。整数取整仍会在邻格之间变化，不声称严格单调。1×10000 得到 1×400，10000×1 得到 400×1，cap=1 得到 1×1。
+
+然后：
 
 ```text
 P = adaptive_avg_pool2d(Z8, (ph, pw))
@@ -130,7 +149,13 @@ T_s = fold(mixed_s) / overlap_count_s
 
 返回顺序仍是 `S, T_lv3, T_lv2, T_lv1`。覆盖计数只计 Query patch 的空间重叠。实现上用单通道 ones 做 fold，再广播到各通道。和旧的 `fold(ones_like(unfold))` 逐元素一致，恒等 unfold/fold 能还原输入，边缘不会因为计数少一截而变暗。权重不再额外除以 k。
 
-显存上不构造完整的 `[B, D_value, k, Nq]`。检索按 `match_query_chunk_size` 对 Query 分块，每块只对当前可见 Key 打分，留下 top-k 分数、索引和 `S`，不保存完整 `[B, Nr, Nq]`。聚合也按块 gather，一个尺度做完再做下一个尺度。需要梯度时，对这一块的加权 gather 使用 PyTorch 1.12 的 `torch.utils.checkpoint` 重算；输入都不需要梯度，或处于 `eval` / `no_grad` 时不重算。不 detach `top_scores`、weights 或 Value。不把整个 SearchTransfer 放进 `no_grad`，也不靠冻结 RefCorrection 省显存。checkpoint 的输入是这一块自己的张量，反向不会串到最后一块或最后一个尺度。
+显存上不构造完整的 `[B, D_value, k, Nq]` 候选张量。检索按 `match_query_chunk_size` 对 Query 分块，每块只对当前可见 Key 打分，留下 top-k 分数、索引和 `S`，不保存完整 `[B, Nr, Nq]`。聚合按块 gather，一个尺度算完再算下一个，避免三个尺度的 k 倍候选张量叠在一起。
+
+这不等于三个 Value unfold 绝不同时存活。开了梯度和 activation checkpoint 时，每个尺度的 unfold 是重计算的输入，可以一直留到反向。同一尺度的多个 chunk 引用的是这一份存储，引用次数不是额外的完整拷贝。局部 gather 出来的候选可以在反向重算。源 Value unfold 和反向还要用的状态仍然要留着。
+
+内部 top-k 索引来自已经核对过参考长度的 `torch.topk` / `torch.max`，生产聚合 `_weighted_gather_unchecked` 不再对每个 chunk、每个尺度做 `min`/`max` 的 GPU 标量读取，反向重算里也不读。形状、dtype、device 和 batch 仍在入口用 Python 元数据检查。外部传入的索引走 `validate_reference_indices`，那里才读一次范围。`debug_check_indices` 默认关闭；打开时只在共享索引生成之后查一次，不进 chunk，也不进 checkpoint。
+
+需要梯度时，对这一块的加权 gather 使用 PyTorch 1.12 的 `torch.utils.checkpoint` 重算；输入都不需要梯度，或处于 `eval` / `no_grad` 时不重算。不 detach `top_scores`、weights 或 Value。不把整个 SearchTransfer 放进 `no_grad`，也不靠冻结 RefCorrection 省显存。checkpoint 的输入是这一块自己的张量，反向不会串到最后一块或最后一个尺度。
 
 分块只减小工作集，搜索范围仍是当前可见的全部 Key。这不是把二次搜索变成线性搜索。
 
@@ -161,12 +186,17 @@ LFCA 的数学、RB 数量、SFE、下采样、skip、CSFI2/CSFI3、MergeTail、
 - `csfi_lfca_v1`：`gain_estimator=local_affine`，`matching_mode=hard_top1`。旧的 `IlluminationEstimator` 类还在。历史 v1 pack 按自己的配置构建并严格加载，不会在加载后悄悄改用新增益头或 top-k。
 - `csfi_lfca_mgain_topk_v2`：`gain_estimator=multiscale_spatial_v1`，`matching_mode=topk_soft`。默认 fresh training。把旧主干做部分匹配加载不算 resume。
 
-下面这些字段进入 resolved config、run metadata、checkpoint 和 eval 重建。top-k 和 temperature 不增加权重，但会改变前向，所以不能只看 state_dict 的形状：
+`gain_grid_policy` 不改变参数形状，但会改变部分粗网格上的前向。新的 v2 fresh 默认 `scaled_budget_v1`，并写进 checkpoint。resume / eval 按包里的值重建。resume 时在命令行改成另一个 policy 会被拒绝，因为那不是同一前向的续训。
+
+历史 v2 包如果没有这个字段，加载配置时明确记成 `legacy_aspect_first`，不用当前 baseline 的新默认值把它换掉。磁盘上的旧包不会被改写。`csfi_lfca_v1` 仍是局部仿射头加 hard top-1，不读这个网格。schema 仍是 4。
+
+下面这些字段进入 resolved config、run metadata、checkpoint 和 eval 重建。top-k、temperature 和网格策略不增加权重，但会改变前向，所以不能只看 state_dict 的形状：
 
 ```text
 gain_estimator, gain_channels, gain_res_blocks,
 gain_attn_heads, gain_attn_depth, gain_attn_ffn_expansion,
 gain_max_tokens, gain_downsample, gain_readout_scale,
+gain_grid_policy,
 matching_mode, match_topk, match_temperature,
 match_query_chunk_size, match_transfer_recompute
 ```
@@ -210,7 +240,17 @@ v2 单测覆盖：160、奇数、非正方形和小尺寸的输入输出；各�
 
 整体 smoke（LTE 用卷积 stub，不是 VGG）：有参考、无参考、奇数尺寸、单 tile 与直接前向一致、多 tile 只调用一次整图增益头、gain/base 裁剪位置一致、输出尺寸和有限性、损失仍是 L1 + MS-SSIM、RefCorrection 有梯度、LTE 参数 `requires_grad=False`。另有一次合成数据上的 v2 fresh / save / resume / 内部 val eval；v1 配置不会建成 v2；LTE-only 不改新主干的零读出。schema 仍是 4。
 
-GPU 显存检查（已执行，一次，不是训练）：真实缓存 VGG、RefCorrection 开启、batch=4、crop=160、k=4、temperature=0.1、chunk=128、recompute=True。合成输入上做一次 L1 + MS-SSIM 前向和反向。
+本轮网格和聚合修改之后，同一组命令又跑过一遍，环境仍是 Python 3.10.20、PyTorch 1.12.1+cu113、1× RTX 4090。`test_mgain_topk_v2.py`、`test_block_amend_lfca.py`、`test_block_amend_round2.py`、`test_block_amend_round3.py`、`test_csfi_unet_stage_a.py` 都通过。参数量没有变化：增益头 260,963，主干 v2 4,116,372，SearchTransfer 0。
+
+新增检查：上表网格；legacy 复现 22×20→11×10、44×40→11×10、64×60→16×15；新规则确定且 token 上限仍是 400；池化前向用测试副本里的非零读出，确认池化路径、输出尺寸、有限的前向反向，以及 context 和读出的梯度。聚合与独立 dense gather 的前向、Value/权重梯度、Query/Key 梯度一致，覆盖重算开关、多种 chunk、k=1、k=4、非方形和 batch>1。外部负索引、越界、dtype/shape 会被拒绝；debug 开关不改变合法结果。
+
+标量读取：在 `_weighted_gather_unchecked` 和它的 checkpoint 反向，以及这条路径上的 SearchTransfer 前向加反向，对 `Tensor.item`、`Tensor.__int__`、`Tensor.__bool__` 的计数是 0。CPU 上是这个计数。CUDA 上用同一 helper 做了一次小型合成 checkpoint 反向，计数也是 0。这不是 wall-time 加速倍数，也没有重测下面的整网峰值。
+
+配置路径走的是读旧包、`merge_resume_config`、再构建模型。没有 `gain_grid_policy` 的 v2 包建成 `legacy_aspect_first`；新包保存并恢复 `scaled_budget_v1`；resume 显式换成另一个 policy 会拒绝。v1 仍是局部仿射头加 hard top-1。top-k 默认、L1 与 MS-SSIM 的 1:1、以及数据协议没有改。
+
+没有做正式训练、短训、全量验证或 Official Test。整网 batch=4、crop=160 的显存峰值没有在本轮重测。
+
+上一轮的 GPU 显存检查（本轮没有重测这组峰值）：真实缓存 VGG、RefCorrection 开启、batch=4、crop=160、k=4、temperature=0.1、chunk=128、recompute=True。合成输入上做一次 L1 + MS-SSIM 前向和反向。数字来自那一次，不是本轮网格和聚合修改之后的新测量。
 
 ```text
 max_memory_allocated = 2,820,077,056 字节（2,689 MiB）
@@ -245,6 +285,7 @@ python block_amend_main.py --mode preflight \
   --gain_estimator multiscale_spatial_v1 \
   --matching_mode topk_soft --match_topk 4 --match_temperature 0.1 \
   --match_query_chunk_size 128 --match_transfer_recompute true \
+  --gain_grid_policy scaled_budget_v1 \
   --dataset_dir "$DATA" --save_dir "$EXP/preflight_mgain_topk_v2" \
   --init_scope fresh
 

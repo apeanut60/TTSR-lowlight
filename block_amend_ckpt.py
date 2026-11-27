@@ -20,7 +20,7 @@ from typing import Any, Dict, Optional, Set
 import torch
 
 from model.restoration_config import (
-    BUILDABLE_VARIANTS, RESTORATION_CONFIG_KEYS,
+    BUILDABLE_VARIANTS, RESTORATION_CONFIG_KEYS, apply_absent_grid_policy,
     require_model_variant, restoration_config_from_args,
 )
 
@@ -576,6 +576,8 @@ def merge_resume_config(
     from types import SimpleNamespace
     merged = dict(baseline_fixed)
     merged.update(ckpt_config)
+    # A v2 pack written before gain_grid_policy keeps the old pooling rule.
+    apply_absent_grid_policy(merged, ckpt_config)
     # Always take path/device ops from CLI when present
     applied = {}
     for key in explicit:

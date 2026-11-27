@@ -100,7 +100,8 @@ class TTSREnhance(nn.Module):
                 gain_attn_heads=rcfg['gain_attn_heads'],
                 gain_attn_depth=rcfg['gain_attn_depth'],
                 gain_attn_ffn_expansion=rcfg['gain_attn_ffn_expansion'],
-                gain_max_tokens=rcfg['gain_max_tokens'])
+                gain_max_tokens=rcfg['gain_max_tokens'],
+                gain_grid_policy=rcfg['gain_grid_policy'])
             match_kwargs = dict(
                 matching_mode=rcfg['matching_mode'],
                 match_topk=rcfg['match_topk'],

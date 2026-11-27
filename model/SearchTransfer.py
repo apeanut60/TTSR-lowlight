@@ -5,21 +5,53 @@ import torch.nn.functional as F
 from torch.utils.checkpoint import checkpoint
 
 
-def _weighted_gather(value, indices, weights):
-    """Mix ``k`` value patches per query. ``value`` is ``[B, D, Nr]``.
+def validate_reference_indices(indices, n_ref):
+    """Range check for indices that did not come from this module's top-k.
 
-    The candidate tensor is only the current query chunk, not all queries.
-    Indices themselves are not differentiated; weights and values are.
+    One read of the min and max. Not used on the per-chunk gather path.
     """
-    b, d, nr = value.shape
+    if indices.dtype != torch.long:
+        raise TypeError(
+            'reference indices must be torch.long, got %s' % indices.dtype)
+    if indices.numel() == 0:
+        return
+    n_ref = int(n_ref)
+    lo = int(indices.detach().min())
+    hi = int(indices.detach().max())
+    if lo < 0 or hi >= n_ref:
+        raise IndexError(
+            'reference index outside [0, %d); min=%d max=%d' % (n_ref, lo, hi))
+
+
+def _weighted_gather_unchecked(value, indices, weights):
+    """Mix ``k`` value patches. ``value`` is ``[B, D, Nr]``.
+
+    No data-dependent scalar read. Caller guarantees ``indices`` are in range:
+    internal top-k / max indices are, and external indices must pass
+    ``validate_reference_indices`` first. Shape and dtype checks use Python
+    metadata only.
+    """
+    if value.dim() != 3 or indices.dim() != 3 or weights.dim() != 3:
+        raise ValueError(
+            'gather expects value [B,D,Nr], indices/weights [B,k,N]')
+    if indices.dtype != torch.long:
+        raise TypeError(
+            'gather indices must be torch.long, got %s' % indices.dtype)
+    if indices.shape != weights.shape:
+        raise ValueError(
+            'indices %s and weights %s must match' % (
+                tuple(indices.shape), tuple(weights.shape)))
+    b, d, _nr = value.shape
+    if int(indices.shape[0]) != int(b):
+        raise ValueError(
+            'gather batch %d != value batch %d' % (int(indices.shape[0]), int(b)))
+    if value.device != indices.device or value.device != weights.device:
+        raise ValueError('gather value, indices and weights must share a device')
     k = int(indices.shape[1])
     n = int(indices.shape[2])
     if n == 0:
         return value.new_zeros(b, d, 0)
     flat = indices.reshape(b, k * n)
-    if int(flat.max()) >= nr or int(flat.min()) < 0:
-        raise IndexError(
-            'top-k index out of range for %d reference patches' % nr)
     gathered = torch.gather(
         value, 2, flat.unsqueeze(1).expand(b, d, k * n))
     gathered = gathered.view(b, d, k, n)
@@ -77,6 +109,9 @@ class SearchTransfer(nn.Module):
         self.match_temperature = float(match_temperature)
         self.match_query_chunk_size = int(match_query_chunk_size)
         self.match_transfer_recompute = bool(match_transfer_recompute)
+        # Off in production. When on, the shared top-k index is range-checked
+        # once, outside the chunk loop and outside activation checkpoint.
+        self.debug_check_indices = False
         if self.matching_mode == 'topk_soft':
             self._validate_topk_config()
 
@@ -339,9 +374,11 @@ class SearchTransfer(nn.Module):
             if needs_grad and self.match_transfer_recompute:
                 # Bind this chunk's tensors as arguments. Do not close over
                 # the loop index, or backward would replay the last chunk.
-                part = checkpoint(_weighted_gather, unfolded, idx, w)
+                # The unfolded map is an input of this recompute, so it can
+                # stay live until backward. Chunks share that one storage.
+                part = checkpoint(_weighted_gather_unchecked, unfolded, idx, w)
             else:
-                part = _weighted_gather(unfolded, idx, w)
+                part = _weighted_gather_unchecked(unfolded, idx, w)
             parts.append(part)
         mixed = torch.cat(parts, dim=2)
         return _fold_with_overlap(
@@ -380,7 +417,14 @@ class SearchTransfer(nn.Module):
             q_norm, k_norm, k_eff)
         shifted = top_scores - top_scores.max(dim=1, keepdim=True).values
         weights = torch.softmax(shifted / self.match_temperature, dim=1)
-        # One scale at a time so the three value unfolds are not all live.
+        if self.debug_check_indices:
+            validate_reference_indices(top_idx, nr)
+        # Scales run in order so the k-expanded candidate tensor of one scale
+        # is folded before the next scale is gathered. That does not mean the
+        # three source unfolds are gone: with grad + checkpoint each unfolded
+        # value is saved as a recompute input until backward. Chunks of one
+        # scale reference that single storage; the reference count is not a
+        # second copy. What is avoided is the full [B, D, k, Nq] candidate.
         t_lv3 = self._mix_scale(
             ref_lv3, top_idx, weights, 3, 1, 1,
             (int(h_out), int(w_out)), nr)

@@ -187,6 +187,9 @@ def build_parser():
     p.add_argument('--gain_max_tokens', type=int, default=None)
     p.add_argument('--gain_downsample', type=str, default=None)
     p.add_argument('--gain_readout_scale', type=int, default=None)
+    p.add_argument('--gain_grid_policy', type=str, default=None,
+                   help='v2 token grid: scaled_budget_v1 (fresh) or '
+                        'legacy_aspect_first')
     p.add_argument('--matching_mode', type=str, default=None)
     p.add_argument('--match_topk', type=int, default=None)
     p.add_argument('--match_temperature', type=float, default=None)

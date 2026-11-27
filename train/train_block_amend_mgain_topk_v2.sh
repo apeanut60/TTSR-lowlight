@@ -36,6 +36,7 @@ echo "============================================"
 echo " block-amend $MODEL_VARIANT"
 echo " mode=train  init_scope=$INIT_SCOPE"
 echo " gain=multiscale_spatial_v1  channels=32,64  res=2,2,1  tokens=400"
+echo " gain_grid_policy=scaled_budget_v1"
 echo " match=topk_soft  k=4  temperature=0.1  chunk=128  recompute=true"
 echo " loss=L1+MS-SSIM 1:1  Adam 1e-4  batch=4  crop=160  epochs=100"
 echo " coverage=$COVERAGE_LABEL"
@@ -75,6 +76,7 @@ fi
     --gain_max_tokens 400 \
     --gain_downsample binomial5_stride2 \
     --gain_readout_scale 4 \
+    --gain_grid_policy scaled_budget_v1 \
     --matching_mode topk_soft \
     --match_topk 4 \
     --match_temperature 0.1 \
