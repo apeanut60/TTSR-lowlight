@@ -1,0 +1,226 @@
+{
+  "train_manifest": 450,
+  "val_manifest": 50,
+  "collect_train_with_ref": 500,
+  "collect_train_missing_ref": 2650,
+  "include_equals_all_with_ref": true,
+  "include_minus_collected": [],
+  "collected_minus_include": [],
+  "official_test_ok": 20,
+  "official_test_missing_ref": 0,
+  "id_overlap_train_val": [],
+  "id_overlap_train_test": [
+    "3004",
+    "3016"
+  ],
+  "id_overlap_val_test": [
+    "3017"
+  ],
+  "test_ref_links": {
+    "n": 20,
+    "jpg_name_png_target": 20,
+    "examples": [
+      {
+        "name": "3001.jpg",
+        "is_link": true,
+        "link_target": "/root/data/datasets/data1/Eval/Nikon/nanobanana_ref_Nikon/3001.png",
+        "realpath": "/root/data/datasets/data1/Eval/Nikon/nanobanana_ref_Nikon/3001.png",
+        "suffix": ".jpg",
+        "target_suffix": ".png"
+      },
+      {
+        "name": "3002.jpg",
+        "is_link": true,
+        "link_target": "/root/data/datasets/data1/Eval/Nikon/nanobanana_ref_Nikon/3002.png",
+        "realpath": "/root/data/datasets/data1/Eval/Nikon/nanobanana_ref_Nikon/3002.png",
+        "suffix": ".jpg",
+        "target_suffix": ".png"
+      },
+      {
+        "name": "3003.jpg",
+        "is_link": true,
+        "link_target": "/root/data/datasets/data1/Eval/Nikon/nanobanana_ref_Nikon/3003.png",
+        "realpath": "/root/data/datasets/data1/Eval/Nikon/nanobanana_ref_Nikon/3003.png",
+        "suffix": ".jpg",
+        "target_suffix": ".png"
+      },
+      {
+        "name": "3004.jpg",
+        "is_link": true,
+        "link_target": "/root/data/datasets/data1/Eval/Nikon/nanobanana_ref_Nikon/3004.png",
+        "realpath": "/root/data/datasets/data1/Eval/Nikon/nanobanana_ref_Nikon/3004.png",
+        "suffix": ".jpg",
+        "target_suffix": ".png"
+      },
+      {
+        "name": "3005.jpg",
+        "is_link": true,
+        "link_target": "/root/data/datasets/data1/Eval/Nikon/nanobanana_ref_Nikon/3005.png",
+        "realpath": "/root/data/datasets/data1/Eval/Nikon/nanobanana_ref_Nikon/3005.png",
+        "suffix": ".jpg",
+        "target_suffix": ".png"
+      }
+    ]
+  },
+  "content_sha_shared_across_splits": [
+    {
+      "sha256": "ce9c2f0cceff1db8b12315754f3f646d897096cc81ee41684ed184020789184e",
+      "where": [
+        [
+          "train",
+          "149"
+        ],
+        [
+          "internal_val",
+          "337"
+        ]
+      ]
+    }
+  ],
+  "n_content_sha_shared_across_splits": 1,
+  "n_realpath_shared_across_splits": 0,
+  "distribution": {
+    "train": {
+      "low_y": {
+        "n": 450,
+        "min": 0.005210109368617241,
+        "p25": 0.0638815688588261,
+        "median": 0.08985901054751327,
+        "p75": 0.12856719576248465,
+        "max": 0.35167664201005927,
+        "mean": 0.10067387568613265
+      },
+      "gt_y": {
+        "n": 450,
+        "min": 0.12620266960911966,
+        "p25": 0.32197961543862336,
+        "median": 0.40198242788117855,
+        "p75": 0.48586957929942803,
+        "max": 0.7436504721583949,
+        "mean": 0.4096183098140347
+      },
+      "ref_y": {
+        "n": 450,
+        "min": 0.03214638709533293,
+        "p25": 0.2384652309809666,
+        "median": 0.3156806788577411,
+        "p75": 0.3881212196739048,
+        "max": 0.7486625217652165,
+        "mean": 0.3189435963503085
+      },
+      "log2_gt_over_low": {
+        "n": 450,
+        "min": 0.5069946976648319,
+        "p25": 1.7657390821791505,
+        "median": 2.0137052682013015,
+        "p75": 2.4868814429143242,
+        "max": 5.405011489609523,
+        "mean": 2.155514598456446
+      },
+      "log2_ref_over_gt": {
+        "n": 450,
+        "min": -2.995712644859922,
+        "p25": -0.6909612041032183,
+        "median": -0.3813775195919922,
+        "p75": -0.046370288457937,
+        "max": 0.9595736022506809,
+        "mean": -0.4135580213705926
+      }
+    },
+    "internal_val": {
+      "low_y": {
+        "n": 50,
+        "min": 0.01263441175832312,
+        "p25": 0.06976510884682649,
+        "median": 0.08906333671619687,
+        "p75": 0.12051583705129183,
+        "max": 0.23600432354217726,
+        "mean": 0.09653267366996016
+      },
+      "gt_y": {
+        "n": 50,
+        "min": 0.13150015880948734,
+        "p25": 0.3171410622207542,
+        "median": 0.39546018347247747,
+        "p75": 0.5024521437956367,
+        "max": 0.6798592594209558,
+        "mean": 0.4086595494941022
+      },
+      "ref_y": {
+        "n": 50,
+        "min": 0.04062765639680351,
+        "p25": 0.2507762045563342,
+        "median": 0.311531958330142,
+        "p75": 0.4036673888649533,
+        "max": 0.5193480528237338,
+        "mean": 0.32065413898820466
+      },
+      "log2_gt_over_low": {
+        "n": 50,
+        "min": 0.9527079965086237,
+        "p25": 1.873968027368095,
+        "median": 2.077956488706368,
+        "p75": 2.379865471321181,
+        "max": 4.87123811910139,
+        "mean": 2.1653097577589424
+      },
+      "log2_ref_over_gt": {
+        "n": 50,
+        "min": -3.2609482390017748,
+        "p25": -0.6687099417079153,
+        "median": -0.341959518000962,
+        "p75": -0.06682235016909506,
+        "max": 0.6150959482570825,
+        "mean": -0.39637486356650753
+      }
+    },
+    "official_test": {
+      "low_y": {
+        "n": 20,
+        "min": 0.03307375905075572,
+        "p25": 0.11671660095135056,
+        "median": 0.16802256722962627,
+        "p75": 0.20364096176247187,
+        "max": 0.3794585968456394,
+        "mean": 0.16840496071218847
+      },
+      "gt_y": {
+        "n": 20,
+        "min": 0.27571183420777157,
+        "p25": 0.4468836594397851,
+        "median": 0.48699394417955977,
+        "p75": 0.5304907381232766,
+        "max": 0.6374940035934946,
+        "mean": 0.48630798772563055
+      },
+      "ref_y": {
+        "n": 20,
+        "min": 0.15386659613708087,
+        "p25": 0.22464667556916837,
+        "median": 0.27662840177728365,
+        "p75": 0.32105599516844374,
+        "max": 0.4314764597313016,
+        "mean": 0.2745053622596275
+      },
+      "log2_gt_over_low": {
+        "n": 20,
+        "min": 0.5588699905125379,
+        "p25": 1.2382890453784214,
+        "median": 1.518504621781312,
+        "p75": 1.976042158510496,
+        "max": 3.4762634323688815,
+        "mean": 1.680095598549633
+      },
+      "log2_ref_over_gt": {
+        "n": 20,
+        "min": -1.7414371581992751,
+        "p25": -1.103974045247497,
+        "median": -0.7981272252557928,
+        "p75": -0.5947792711797079,
+        "max": -0.20525497230696896,
+        "mean": -0.8517243137165966
+      }
+    }
+  },
+  "selection_mechanism": "collect_triplets keeps every Train Low that has a same-scene Normal and a reference file. It does not sample 500 out of a larger referenced set. split_train_val then shuffles those ids with random.Random(split_seed=42) and takes round(n*0.1) as val. The 2650 excluded names are Low files whose reference path is absent."
+}

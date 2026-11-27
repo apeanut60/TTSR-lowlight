@@ -1,0 +1,59 @@
+{
+  "audit_dir": "/root/projects/TTSR-lowlight-v1-data1SOTA/diagnostics/block_amend_short_ft_audit_20261126",
+  "git_head": "a88566ecaf9f4173479185c66392b87f37efadca",
+  "scope_excluded": ["short_ft_r3", "unretained 100-epoch intermediate checkpoints", "cross-dataset checkpoints"],
+  "bounded_inference_run": false,
+  "bounded_inference_reason": "Per-image JSON already shows whether the Real ep4 drop is widespread or tail-driven. No whole-image base/residual decomposition was collected.",
+  "answers": [
+    {
+      "question": "Confirmed code, artifact-pairing, or cache error?",
+      "status": "no confirmed bug",
+      "fact": "45 short-ft epoch packs plus 3 internal-val best packs load as schema 4 / csfi_lfca_v1. Each stage has 5 distinct model_state_dict fingerprints. Official-test JSON checkpoint_path and checkpoint_epoch match the epoch file that exists now. Per-image means equal the stored means. Sample counts are 64/100, 50/30, 50/20. Adam steps are 143, 286, 429, 572, 715 on Real, i.e. a new optimizer, not a resumed 100-epoch counter. Learning rate in the pack and in the log is 1e-5 for every local epoch. gamma is 1.",
+      "evidence": ["artifact_inventory.json", "training_protocol_audit.json"],
+      "inference": "The queue refuses to start an eval when the output directory exists. It does not validate an existing JSON. The JSONs that exist were checked after the fact and are internally consistent.",
+      "missing": "Eval JSON does not store a checkpoint SHA256 from generation time. Identity is checked against the file at the recorded path now.",
+      "scope": "The three datasets and three finished short-ft stages. short_ft_r3 was not included."
+    },
+    {
+      "question": "Do the short-ft stages replay the same data and augmentation sequence?",
+      "status": "replay follows from unchanged code; no stored historical trace",
+      "fact": "dataset/block_amend_lolv2.py is identical between amend-4 (2026-11-19 23:05, before these runs) and HEAD. Augmentation seed is SHA256(base_seed|epoch|sample_id). train_loop calls set_epoch with the same integer it logs. Every short-ft log starts at Epoch 1. Every pack has seed 42, crop 160, batch 4, num_workers 4. Shuffle uses a fresh torch.Generator seeded inside prepare_data. A second generator with the same seed reproduced epoch-1 order. Geometry does not read the stage name.",
+      "evidence": ["augmentation_replay_summary.json", "augmentation_trace.jsonl", "git diff 92b9014..HEAD -- dataset/block_amend_lolv2.py is empty"],
+      "inference": "For a fixed local epoch, crop/flip/rotation and shuffle order are the same across short_ft_5ep, short_ft_r2, and short_ft_w91, provided image H/W did not change between the runs. H/W were read from the files now. No per-step trace was saved on 2026-11-20.",
+      "missing": "A log of the actual Nov 20 RNG consumption. Current image dimensions are a proxy, not an archived measurement.",
+      "scope": "This does not establish that the repeated sequence caused the ep4 PSNR drop."
+    },
+    {
+      "question": "Is the Real ep4 drop widespread or a few images?",
+      "status": "official test is widespread; internal val is mixed with a repeated severe tail",
+      "fact": "Official test ep3 to ep4, n=100. short_ft_5ep: mean -1.240 dB, median -1.574, 79 down, 69 down by more than 1 dB, worst-10 contribution -0.397. short_ft_r2: mean -1.231, median -1.566, 78 down, 69 below -1 dB, worst-10 contribution -0.412. short_ft_w91: mean -1.542, median -1.889, 81 down, 71 below -1 dB, worst-10 contribution -0.464. Eight of the ten worst test ids are shared by all three stages: 00712, 00713, 00716, 00731, 00737, 00738, 00773, 00774. Internal val n=64: means -0.243 / -0.358 / -0.415, medians -0.165 / -0.355 / -0.316, about 33 of 64 down, 24 to 28 down by more than 1 dB. Nine val ids are in the worst 10 of every stage. Mean frac_gt1 rises from about 0.001 to 0.004-0.006. Last-10 training-batch luminance does not single out epoch 4 (Real low Y means 0.062, 0.057, 0.062 for epochs 3, 4, 5).",
+      "evidence": ["per_image_deltas.csv", "per_image_delta_summary.json", "augmentation_replay_summary.json"],
+      "inference": "The test-set mean is not created by a handful of failures. The median drop is larger than the mean because some images improve and pull the mean up. The same images are the severe tail in every stage. Clipping of values above 1 increases, but the clipped fraction stays below 1 percent of pixels, so it is not by itself the 1.2 dB shift.",
+      "missing": "Whole-image light-up base and RGB residual for ep3/ep4/ep5. PNG exports are clipped and quantized and were not used as metrics.",
+      "scope": "Real only. Huawei and Nikon do not show this even-epoch collapse."
+    },
+    {
+      "question": "Evidence for or against a light-up or residual explanation?",
+      "status": "not tested",
+      "fact": "No diagnostic forward was run. frac_gt1 and raw_min/raw_max move with ep4, which is consistent with a brighter raw output on some pixels and does not identify the branch.",
+      "evidence": ["per_image_delta_summary.json mean_frac_gt1 fields"],
+      "inference": "None about base versus residual.",
+      "missing": "Tiled, overlap-weighted base and residual on a fixed internal-val subset, checked against raw output.",
+      "scope": "A correlation with overrun fraction is not a cause."
+    },
+    {
+      "question": "Is the Nikon val/test gap a pairing or protocol error, or a set difference?",
+      "status": "protocol and file pairing check out; the sets differ in simple luminance; one content duplicate exists inside train/val",
+      "fact": "Train manifest 450, val 50, collect_triplets finds 500 Train images with a reference and 2650 without. The 500 ids equal the train+val manifest. Test has 20 images and 0 missing refs. All 20 test reference names are jpg symlinks to png files under Eval/Nikon/nanobanana_ref_Nikon. Metric protocol on the compared JSONs is rgb_float_clipped_v1, ids match across epochs, and means match per-image averages. String ids 3004 and 3016 occur in both train and test, and 3017 in both val and test, but the Low file hashes differ and the paths are Train/Low versus Test/Low. Zero realpaths are shared across splits. One Low-byte duplicate: train id 149 and val id 337, sha256 ce9c2f0cceff1db8b12315754f3f646d897096cc81ee41684ed184020789184e, different paths. Low luminance median is 0.090 train, 0.089 val, 0.168 test. Ranges overlap (train max 0.352, test min 0.033, test max 0.379). From the 100-epoch best to short_ft_r2 epoch 5: val mean delta -0.299 dB, median -0.271, 29 of 50 down; test mean +0.243, median +0.166, 15 of 20 up. Worst 5 val images contribute -0.252 of that -0.299 mean.",
+      "evidence": ["nikon_audit.json", "nikon_split_summary.csv", "official_test/eval_official_test.json", "official_test_short_ft_r2/epoch_0005/eval_official_test.json", "val_metrics_ep00079.json", "short_ft_r2/val_metrics_ep00005.json"],
+      "inference": "The gap is not explained by a wrong reference suffix, a missing test pair, or a different metric. The same-id strings are different files. The test lows are brighter in the center of the sample than the referenced train pool, and the test references are darker relative to GT, but the ranges overlap and n=20. The val decline and test rise are group movements in opposite directions, not one shared image.",
+      "missing": "Whether train 149 and val 337 also share GT and reference bytes. A larger description than global luminance. No claim of a statistically tested domain shift.",
+      "scope": "Does not say the internal val is useless or that test selection should be continued."
+    }
+  ],
+  "fix": {
+    "confirmed_bug": false,
+    "location": null,
+    "next_evidence_gap": "If the ep4 mechanism is still needed, run the already specified no-grad tiled decomposition on a frozen Real internal-val subset (the repeated worst ids 00053, 00595, 00215, plus one median and one improved id). Do not start another short-ft or pick a new test checkpoint."
+  }
+}
