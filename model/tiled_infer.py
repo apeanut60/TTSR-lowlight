@@ -143,6 +143,7 @@ def tiled_forward(
                 refsr_w, _ = pad_to_multiple(refsr, 4)
             tile = int(math.ceil(tile / 4.0) * 4)
             overlap = int(math.floor(overlap / 4.0) * 4)
+            # Gain runs inside this one full-image stem. Tiles only crop it.
             stem_full = net.MainNet.encode_low_stem(lr_w)
 
         _, _, height, width = lr_w.shape

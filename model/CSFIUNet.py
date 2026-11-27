@@ -23,6 +23,9 @@ from model.frequency_mixer import (
     LFCA, LOWPASS_KERNEL_SIZE, LOWPASS_KERNEL_TYPE,
 )
 from model.illumination import IlluminationEstimator
+from model.multiscale_gain import (
+    MultiScaleSpatialGainEstimator, summarize_log_gain,
+)
 from model.MainNetEnhance import GlobalIllumHead, RefIllumTransfer
 from model.restoration_config import MODEL_VARIANT, parse_restoration_blocks
 
@@ -186,6 +189,13 @@ class CSFIUNet(nn.Module):
         use_global_illum=False,
         use_ref_illum=False,
         ref_illum_pool=8,
+        gain_estimator='local_affine',
+        gain_channels=(32, 64),
+        gain_res_blocks=(2, 2, 1),
+        gain_attn_heads=4,
+        gain_attn_depth=1,
+        gain_attn_ffn_expansion=2,
+        gain_max_tokens=400,
     ):
         super().__init__()
         blocks = parse_num_res_blocks(num_res_blocks)
@@ -252,7 +262,27 @@ class CSFIUNet(nn.Module):
             with torch.no_grad():
                 head.weight.mul_(0.01)
 
-        self.illumination_estimator = IlluminationEstimator(n_feats)
+        self.gain_estimator_name = str(gain_estimator).strip().lower()
+        self.gain_forward_calls = 0
+        self.collect_gain_diag = False
+        self.last_gain_diag = None
+        self.spatial_gain = None
+        self.illumination_estimator = None
+        if self.gain_estimator_name == 'local_affine':
+            self.model_variant = MODEL_VARIANT
+            self.illumination_estimator = IlluminationEstimator(n_feats)
+        elif self.gain_estimator_name == 'multiscale_spatial_v1':
+            self.model_variant = 'csfi_lfca_mgain_topk_v2'
+            self.spatial_gain = MultiScaleSpatialGainEstimator(
+                channels=tuple(int(x) for x in gain_channels),
+                res_blocks=tuple(int(x) for x in gain_res_blocks),
+                heads=int(gain_attn_heads),
+                attn_depth=int(gain_attn_depth),
+                ffn_expansion=int(gain_attn_ffn_expansion),
+                max_tokens=int(gain_max_tokens))
+        else:
+            raise ValueError(
+                'Unknown gain_estimator %r' % (gain_estimator,))
         self.coarse_freq_block = LFCA(
             n_feats, num_blocks=depth_coarse, heads=restoration_heads,
             ffn_expansion=restoration_ffn_expansion)
@@ -318,15 +348,27 @@ class CSFIUNet(nn.Module):
     def encode_low_stem(self, x):
         """Pad + light-up base + SFE + downs.
 
-        The estimator's feature map is only an internal of the log_gain
-        readout; it is not part of the stem (LFCA blocks take features only).
+        The estimator feature is not part of the stem (LFCA takes features
+        only). SFE reads this padded Low, not ``base``.
+
+        Training calls this on the crop. Tiled inference calls it once on
+        the padded full image and then ``crop_stem``. Those two gain contexts
+        are not the same exposure field.
         """
         orig_hw = x.shape[-2:]
         th = int(math.ceil(orig_hw[0] / 4.0) * 4)
         tw = int(math.ceil(orig_hw[1] / 4.0) * 4)
         low = self.safe_pad(x, (th, tw))
         low01 = (low + 1.) * 0.5
-        _, log_gain = self.illumination_estimator(low01)
+        self.gain_forward_calls += 1
+        if self.spatial_gain is not None:
+            _, log_gain = self.spatial_gain(low01)
+        else:
+            _, log_gain = self.illumination_estimator(low01)
+        if self.collect_gain_diag:
+            self.last_gain_diag = summarize_log_gain(log_gain)
+        else:
+            self.last_gain_diag = None
         if self.enable_lightup:
             lightup = low01 * torch.exp(log_gain.clamp(-1.5, 1.5))
             base = 2. * lightup - 1.

@@ -1,11 +1,13 @@
 """Model identity + restoration-block config for the block-amend CSFI-U-Net.
 
-Current variant: ``csfi_lfca_v1`` (LFCA at coarse H/4 and middle H/2).
-The previous variant (IGAB at the same two positions, commit 5777e63 and
-earlier) is referred to as ``csfi_igab_v0``; its checkpoints never declared a
-``model_variant`` and are recognised by their state_dict keys / config.
+Buildable variants, selected by ``model_variant`` (no plugin registry):
 
-No registry: this code builds exactly one variant and refuses the other.
+- ``csfi_lfca_v1``: local affine gain head + hard top-1 transfer.
+- ``csfi_lfca_mgain_topk_v2``: multi-scale spatial gain + top-k soft transfer.
+
+The IGAB variant (``csfi_igab_v0``, commit 5777e63 and earlier) is refused.
+Top-k and temperature add no parameters, so a pack's behavior is the saved
+config, not the state_dict shapes.
 """
 from __future__ import annotations
 
@@ -13,11 +15,13 @@ import warnings
 from typing import Any, Dict, Iterable, Optional, Set, Tuple
 
 MODEL_VARIANT = 'csfi_lfca_v1'
+MODEL_VARIANT_V2 = 'csfi_lfca_mgain_topk_v2'
+BUILDABLE_VARIANTS = (MODEL_VARIANT, MODEL_VARIANT_V2)
 LEGACY_IGAB_VARIANT = 'csfi_igab_v0'
 LEGACY_IGAB_COMMIT = '5777e63'
 
-RESTORATION_DEFAULTS = dict(
-    model_variant=MODEL_VARIANT,
+# Shared restoration trunk. Both variants lock these.
+_SHARED_RESTORATION = dict(
     restoration_block='lfca',
     restoration_blocks='1,1',      # depth at coarse(H/4),middle(H/2)
     restoration_heads=1,
@@ -25,7 +29,58 @@ RESTORATION_DEFAULTS = dict(
     lowpass_kernel='binomial',
     lowpass_kernel_size=5,
 )
+
+# Gain-head architecture. v1 records it and does not build it.
+_GAIN_ARCH = dict(
+    gain_channels='32,64',
+    gain_res_blocks='2,2,1',
+    gain_attn_heads=4,
+    gain_attn_depth=1,
+    gain_attn_ffn_expansion=2,
+    gain_max_tokens=400,
+    gain_downsample='binomial5_stride2',
+    gain_readout_scale=4,
+)
+
+# v1 behavior. match_* below hard_top1 are unused by that path.
+_V1_BEHAVIOR = dict(
+    gain_estimator='local_affine',
+    matching_mode='hard_top1',
+    match_topk=1,
+    match_temperature=0.1,
+    match_query_chunk_size=128,
+    match_transfer_recompute=True,
+    **_GAIN_ARCH,
+)
+
+# v2 defaults. Matching k / temperature / chunk may differ; the gain
+# architecture stays the fixed starting point.
+_V2_BEHAVIOR = dict(
+    gain_estimator='multiscale_spatial_v1',
+    matching_mode='topk_soft',
+    match_topk=4,
+    match_temperature=0.1,
+    match_query_chunk_size=128,
+    match_transfer_recompute=True,
+    **_GAIN_ARCH,
+)
+
+RESTORATION_DEFAULTS = dict(
+    model_variant=MODEL_VARIANT,
+    **_SHARED_RESTORATION,
+    **_V1_BEHAVIOR,
+)
+V2_DEFAULTS = dict(
+    model_variant=MODEL_VARIANT_V2,
+    **_SHARED_RESTORATION,
+    **_V2_BEHAVIOR,
+)
 RESTORATION_CONFIG_KEYS = tuple(RESTORATION_DEFAULTS)
+_LOCKED_GAIN_ARCH_KEYS = tuple(_GAIN_ARCH)
+_MATCH_RANGE_KEYS = (
+    'match_topk', 'match_temperature', 'match_query_chunk_size',
+    'match_transfer_recompute',
+)
 
 # Deprecated CLI/config aliases -> neutral names.
 DEPRECATED_ALIASES = {
@@ -53,12 +108,51 @@ def parse_restoration_blocks(spec) -> Tuple[int, int]:
     return parts[0], parts[1]
 
 
+def _as_bool(value):
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        if value == 0:
+            return False
+        if value == 1:
+            return True
+    text = str(value).strip().lower()
+    if text in ('1', 'true', 'yes'):
+        return True
+    if text in ('0', 'false', 'no'):
+        return False
+    raise ValueError('expected a boolean, got %r' % (value,))
+
+
+def _canon_int_list(value):
+    if isinstance(value, (list, tuple)):
+        parts = [int(x) for x in value]
+    else:
+        parts = [int(x) for x in str(value).replace(' ', '').split(',') if x != '']
+    if not parts:
+        raise ValueError('empty integer list %r' % (value,))
+    return ','.join(str(x) for x in parts)
+
+
 def _canon(key, value):
     if key == 'restoration_blocks':
         return '%d,%d' % parse_restoration_blocks(value)
     if key in ('restoration_heads', 'restoration_ffn_expansion',
-               'lowpass_kernel_size'):
+               'lowpass_kernel_size', 'gain_attn_heads', 'gain_attn_depth',
+               'gain_attn_ffn_expansion', 'gain_max_tokens',
+               'gain_readout_scale', 'match_topk', 'match_query_chunk_size'):
         return int(value)
+    if key == 'match_temperature':
+        return float(value)
+    if key == 'match_transfer_recompute':
+        return _as_bool(value)
+    if key in ('gain_channels', 'gain_res_blocks'):
+        return _canon_int_list(value)
+    if key == 'gain_downsample':
+        text = str(value).strip().lower()
+        if text == 'fixed_binomial5_stride2':
+            return 'binomial5_stride2'
+        return text
     return str(value).strip().lower()
 
 
@@ -68,24 +162,64 @@ def _getter(args):
     return lambda k: getattr(args, k, None)
 
 
+def _not_buildable(variant):
+    hint = ''
+    if variant == LEGACY_IGAB_VARIANT:
+        hint = (' The IGAB variant is only buildable from commit %s.'
+                % LEGACY_IGAB_COMMIT)
+    raise ValueError(
+        'model_variant=%r is not buildable by this code (builds %s).%s'
+        % (variant, ' or '.join(BUILDABLE_VARIANTS), hint))
+
+
 def validate_restoration_config(cfg: Dict[str, Any]) -> Dict[str, Any]:
+    missing = [k for k in RESTORATION_CONFIG_KEYS if k not in cfg or cfg[k] is None]
+    if missing:
+        raise ValueError('restoration config missing %s' % missing)
     out = {k: _canon(k, cfg[k]) for k in RESTORATION_CONFIG_KEYS}
-    if out['model_variant'] != MODEL_VARIANT:
-        hint = ''
-        if out['model_variant'] == LEGACY_IGAB_VARIANT:
-            hint = (' The IGAB variant is only buildable from commit %s.'
-                    % LEGACY_IGAB_COMMIT)
-        raise ValueError(
-            'model_variant=%r is not buildable by this code (builds %r).%s'
-            % (out['model_variant'], MODEL_VARIANT, hint))
+    variant = out['model_variant']
+    if variant not in BUILDABLE_VARIANTS:
+        _not_buildable(variant)
+    # Depth and head count stay configurable. The block type does not.
     for key in ('restoration_block', 'restoration_ffn_expansion',
                 'lowpass_kernel', 'lowpass_kernel_size'):
         if out[key] != RESTORATION_DEFAULTS[key]:
             raise ValueError(
                 '%s fixes %s=%r, got %r'
-                % (MODEL_VARIANT, key, RESTORATION_DEFAULTS[key], out[key]))
+                % (variant, key, RESTORATION_DEFAULTS[key], out[key]))
     if out['restoration_heads'] < 1:
         raise ValueError('restoration_heads must be >= 1')
+    for key in _LOCKED_GAIN_ARCH_KEYS:
+        if out[key] != _GAIN_ARCH[key]:
+            raise ValueError(
+                '%s fixes %s=%r, got %r'
+                % (variant, key, _GAIN_ARCH[key], out[key]))
+    if variant == MODEL_VARIANT:
+        for key, expect in _V1_BEHAVIOR.items():
+            if out[key] != expect:
+                raise ValueError(
+                    '%s fixes %s=%r, got %r' % (variant, key, expect, out[key]))
+    else:
+        if out['gain_estimator'] != _V2_BEHAVIOR['gain_estimator']:
+            raise ValueError(
+                '%s fixes gain_estimator=%r, got %r' % (
+                    variant, _V2_BEHAVIOR['gain_estimator'],
+                    out['gain_estimator']))
+        if out['matching_mode'] != 'topk_soft':
+            raise ValueError(
+                '%s fixes matching_mode=%r, got %r' % (
+                    variant, 'topk_soft', out['matching_mode']))
+        if out['match_topk'] < 1:
+            raise ValueError('match_topk must be a positive integer')
+        temp = out['match_temperature']
+        if temp != temp or temp in (float('inf'), float('-inf')) or temp <= 0:
+            raise ValueError(
+                'match_temperature must be a finite positive number, got %r' % (
+                    temp,))
+        if out['match_query_chunk_size'] < 1:
+            raise ValueError('match_query_chunk_size must be >= 1')
+        if not isinstance(out['match_transfer_recompute'], bool):
+            raise ValueError('match_transfer_recompute must be a boolean')
     return out
 
 
@@ -96,10 +230,16 @@ def restoration_config_from_args(args) -> Dict[str, Any]:
     aliases warn; an alias that disagrees with a set neutral name is an error.
     """
     get = _getter(args)
+    variant = get('model_variant')
+    if variant is None:
+        variant = MODEL_VARIANT
+    variant = str(variant).strip().lower()
+    defaults = V2_DEFAULTS if variant == MODEL_VARIANT_V2 else RESTORATION_DEFAULTS
     cfg = {}
-    for key, default in RESTORATION_DEFAULTS.items():
+    for key, default in defaults.items():
         v = get(key)
         cfg[key] = default if v is None else v
+    cfg['model_variant'] = variant
     for old, new in DEPRECATED_ALIASES.items():
         old_v = get(old)
         if old_v is None:
@@ -152,15 +292,13 @@ def has_legacy_igab_keys(state_keys: Iterable) -> bool:
 
 
 def _incompatible_msg(path, found, how) -> str:
+    buildable = ' or '.join(BUILDABLE_VARIANTS)
     return (
         'Checkpoint %s is model_variant=%s (%s); this code builds %s. '
-        'The restoration block differs (IGAB: MainNet.coarse_igab.*/'
-        'middle_igab.* with illumination-modulated Value; LFCA: '
-        'MainNet.coarse_freq_block.*/middle_freq_block.*), so it cannot be '
-        'resumed, evaluated, or partially/shape-filtered loaded here. '
-        'Train %s fresh (optionally --init_scope lte_only), or use commit %s '
-        'for %s checkpoints.'
-        % (path or '<checkpoint>', found, how, MODEL_VARIANT, MODEL_VARIANT,
+        'IGAB (MainNet.coarse_igab.*/middle_igab.*) is not either LFCA '
+        'variant, so it cannot be resumed, evaluated, or partially loaded. '
+        'Use commit %s for %s checkpoints.'
+        % (path or '<checkpoint>', found, how, buildable,
            LEGACY_IGAB_COMMIT, LEGACY_IGAB_VARIANT))
 
 
@@ -193,9 +331,9 @@ def checkpoint_model_variant(raw) -> Tuple[Optional[str], str]:
 
 
 def require_model_variant(raw, path: str = '') -> str:
-    """Refuse packs that are not ``MODEL_VARIANT`` (checked before anything else)."""
+    """Refuse packs that are not a buildable variant (checked first)."""
     variant, how = checkpoint_model_variant(raw)
-    if variant != MODEL_VARIANT:
+    if variant not in BUILDABLE_VARIANTS:
         raise RuntimeError(_incompatible_msg(path, variant, how))
     cfg = raw.get('config') if isinstance(raw.get('config'), dict) else {}
     top = raw.get('model_variant')

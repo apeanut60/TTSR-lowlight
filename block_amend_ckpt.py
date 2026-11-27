@@ -1,8 +1,9 @@
 """Checkpoint schema, atomic save, and resume helpers for block-amend.
 
-Schema 4 (this file): same model (``csfi_lfca_v1``) as schema 3, but the pack
-is tensors plus plain Python values. RNG state is an explicit encoding, not a
-pickled NumPy object, so a ``weights_only=True`` load can read it.
+Schema 4 (this file): tensors plus plain Python values. RNG state is an
+explicit encoding, not a pickled NumPy object. ``csfi_lfca_v1`` and
+``csfi_lfca_mgain_topk_v2`` both use this schema; ``model_variant`` and the
+saved config select the behavior.
 
 The whole pack is loaded on CPU. Model weights are copied into the already
 built module; optimizer tensors are placed by ``Optimizer.load_state_dict``
@@ -19,12 +20,14 @@ from typing import Any, Dict, Optional, Set
 import torch
 
 from model.restoration_config import (
-    MODEL_VARIANT, RESTORATION_CONFIG_KEYS, require_model_variant,
+    BUILDABLE_VARIANTS, RESTORATION_CONFIG_KEYS,
+    require_model_variant, restoration_config_from_args,
 )
 
-# v4: safe RNG encoding (no NumPy objects in the pack). Model is still
-# csfi_lfca_v1; this is a checkpoint-format change, not an architecture change.
-# v3: same model, NumPy RNG objects. v2: IGAB variant.
+# v4: safe RNG encoding (no NumPy objects in the pack). Buildable models are
+# csfi_lfca_v1 and csfi_lfca_mgain_topk_v2; the variant lives in
+# model_variant plus the full restoration config, not in a schema bump.
+# v3: same encoding gap, NumPy RNG objects. v2: IGAB variant.
 CHECKPOINT_SCHEMA_VERSION = 4
 RNG_FORMAT = 'block_amend_rng_v1'
 _SCHEMA3_HINT = (
@@ -455,6 +458,9 @@ def resolved_config_from_args(args) -> Dict:
                 out[k] = v
             else:
                 out[k] = str(v)
+    # Unset gain/matching fields mean the variant default. That is the same
+    # choice TTSREnhance makes, and the pack has to record it.
+    out.update(restoration_config_from_args(args))
     return out
 
 
@@ -486,10 +492,10 @@ def build_checkpoint_pack(
         raise RuntimeError(
             'Refusing to write a checkpoint without model identity; args lack %s'
             % missing_id)
-    if config['model_variant'] != MODEL_VARIANT:
+    if config['model_variant'] not in BUILDABLE_VARIANTS:
         raise RuntimeError(
-            'args.model_variant=%r but this code builds %r'
-            % (config['model_variant'], MODEL_VARIANT))
+            'args.model_variant=%r but this code builds %s'
+            % (config['model_variant'], ' or '.join(BUILDABLE_VARIANTS)))
     return {
         'checkpoint_schema_version': CHECKPOINT_SCHEMA_VERSION,
         'model_variant': config['model_variant'],

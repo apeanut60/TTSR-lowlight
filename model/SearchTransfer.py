@@ -2,23 +2,98 @@ import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.utils.checkpoint import checkpoint
+
+
+def _weighted_gather(value, indices, weights):
+    """Mix ``k`` value patches per query. ``value`` is ``[B, D, Nr]``.
+
+    The candidate tensor is only the current query chunk, not all queries.
+    Indices themselves are not differentiated; weights and values are.
+    """
+    b, d, nr = value.shape
+    k = int(indices.shape[1])
+    n = int(indices.shape[2])
+    if n == 0:
+        return value.new_zeros(b, d, 0)
+    flat = indices.reshape(b, k * n)
+    if int(flat.max()) >= nr or int(flat.min()) < 0:
+        raise IndexError(
+            'top-k index out of range for %d reference patches' % nr)
+    gathered = torch.gather(
+        value, 2, flat.unsqueeze(1).expand(b, d, k * n))
+    gathered = gathered.view(b, d, k, n)
+    return (gathered * weights.unsqueeze(1)).sum(dim=2)
+
+
+def _fold_with_overlap(patches, output_size, kernel, padding, stride):
+    """Fold, then divide by a 1-channel geometric overlap count.
+
+    The count is the number of query patches that cover each pixel. It is
+    not the candidate count and not a sum of candidate weights. A 1-channel
+    ones-fold matches one channel of ``fold(ones_like(unfold))``.
+    """
+    kk = int(kernel) * int(kernel)
+    if int(patches.shape[1]) % kk != 0:
+        raise RuntimeError(
+            'unfold channels %d not divisible by kernel area %d' % (
+                int(patches.shape[1]), kk))
+    folded = F.fold(
+        patches, output_size=output_size, kernel_size=kernel,
+        padding=padding, stride=stride)
+    ones = patches.new_ones(1, kk, patches.shape[2])
+    norm = F.fold(
+        ones, output_size=output_size, kernel_size=kernel,
+        padding=padding, stride=stride)
+    return folded / norm.clamp(min=1)
 
 
 class SearchTransfer(nn.Module):
-    """Texture search and transfer module.
-    Adapted for 1:1 low-light enhancement:
-    - Search: patch matching at lv3 scale (unchanged)
-    - Transfer: unfold with stride matching VGG scale ratio,
-      fold back to each level's native resolution.
-      lv3 → H/4×W/4, lv2 → H/2×W/2, lv1 → H×W
-      MainNetEnhance interpolates all to unified feature size.
+    """Texture search and transfer.
 
-    Optional eval-only Identity transfer reuses the same unfold/gather/fold
-    path with spatially corresponding indices (not RGB interpolation).
+    ``hard_top1`` is the original path: one ``torch.max`` over reference patches.
+    ``topk_soft`` mixes the top-k reference patches with a softmax over cosine
+    similarity. ``k_eff == 1`` uses ``torch.max`` and weight 1, so it matches
+    ``hard_top1`` including ties. For ``k > 1``, ``torch.topk`` chooses among
+    ties by its own rule; that order is not claimed to be identical across
+    devices.
+
+    ``S`` remains the maximum raw cosine. Candidate weights are not a confidence.
+    The three value scales share one lv3 index set and one weight vector.
+    Identity transfer still reuses unfold / gather / fold with matching coordinates.
     """
 
-    def __init__(self):
+    def __init__(self, matching_mode='hard_top1', match_topk=1,
+                 match_temperature=0.1, match_query_chunk_size=128,
+                 match_transfer_recompute=True):
         super(SearchTransfer, self).__init__()
+        mode = str(matching_mode).strip().lower()
+        if mode not in ('hard_top1', 'topk_soft'):
+            raise ValueError(
+                'matching_mode must be hard_top1 or topk_soft, got %r' % (
+                    matching_mode,))
+        self.matching_mode = mode
+        self.match_topk = int(match_topk)
+        self.match_temperature = float(match_temperature)
+        self.match_query_chunk_size = int(match_query_chunk_size)
+        self.match_transfer_recompute = bool(match_transfer_recompute)
+        if self.matching_mode == 'topk_soft':
+            self._validate_topk_config()
+
+    def _validate_topk_config(self):
+        if self.match_topk < 1:
+            raise ValueError(
+                'match_topk must be a positive integer, got %r' % (
+                    self.match_topk,))
+        temp = self.match_temperature
+        if not math.isfinite(temp) or temp <= 0:
+            raise ValueError(
+                'match_temperature must be a finite positive number, got %r' % (
+                    temp,))
+        if self.match_query_chunk_size < 1:
+            raise ValueError(
+                'match_query_chunk_size must be >= 1, got %r' % (
+                    self.match_query_chunk_size,))
 
     def bis(self, input, dim, index):
         # batch index select
@@ -119,7 +194,18 @@ class SearchTransfer(nn.Module):
             match_arg, ref_lv1, ref_lv2, ref_lv3, H_out, W_out)
 
     def forward(self, lrsr_lv3, refsr_lv3, ref_lv1, ref_lv2, ref_lv3,
-                return_diag=False):
+                return_diag=False, return_match_candidates=False):
+        if self.matching_mode == 'hard_top1':
+            return self._forward_hard_top1(
+                lrsr_lv3, refsr_lv3, ref_lv1, ref_lv2, ref_lv3,
+                return_diag=return_diag)
+        return self._forward_topk_soft(
+            lrsr_lv3, refsr_lv3, ref_lv1, ref_lv2, ref_lv3,
+            return_diag=return_diag,
+            return_match_candidates=return_match_candidates)
+
+    def _forward_hard_top1(self, lrsr_lv3, refsr_lv3, ref_lv1, ref_lv2, ref_lv3,
+                           return_diag=False):
         """
         Args:
             lrsr_lv3: [N, C, H, W] features of low-light image (VGG lv3) — Query
@@ -167,6 +253,173 @@ class SearchTransfer(nn.Module):
         if return_diag:
             return S, T_lv3, T_lv2, T_lv1, diag
         return S, T_lv3, T_lv2, T_lv1
+
+    def _check_topk_grids(self, lrsr_lv3, refsr_lv3, ref_lv1, ref_lv2, ref_lv3):
+        if lrsr_lv3.dim() != 4 or refsr_lv3.dim() != 4:
+            raise ValueError('Query and Key must be NCHW')
+        if int(lrsr_lv3.shape[0]) != int(refsr_lv3.shape[0]):
+            raise ValueError(
+                'Query/Key batch mismatch %s vs %s' % (
+                    tuple(lrsr_lv3.shape), tuple(refsr_lv3.shape)))
+        if int(lrsr_lv3.shape[1]) != int(refsr_lv3.shape[1]):
+            raise ValueError(
+                'Query/Key channel mismatch %s vs %s' % (
+                    tuple(lrsr_lv3.shape), tuple(refsr_lv3.shape)))
+        hr, wr = int(refsr_lv3.shape[-2]), int(refsr_lv3.shape[-1])
+        if tuple(ref_lv3.shape[-2:]) != (hr, wr):
+            raise ValueError(
+                'ref lv3 spatial %s != Key %s; refusing to truncate or reorder'
+                % (tuple(ref_lv3.shape[-2:]), (hr, wr)))
+        if tuple(ref_lv2.shape[-2:]) != (hr * 2, wr * 2):
+            raise ValueError(
+                'ref lv2 spatial %s != 2x Key %s' % (
+                    tuple(ref_lv2.shape[-2:]), (hr, wr)))
+        if tuple(ref_lv1.shape[-2:]) != (hr * 4, wr * 4):
+            raise ValueError(
+                'ref lv1 spatial %s != 4x Key %s' % (
+                    tuple(ref_lv1.shape[-2:]), (hr, wr)))
+        b = int(lrsr_lv3.shape[0])
+        for name, ref in (('lv1', ref_lv1), ('lv2', ref_lv2), ('lv3', ref_lv3)):
+            if int(ref.shape[0]) != b:
+                raise ValueError(
+                    'ref %s batch %d != Query batch %d' % (
+                        name, int(ref.shape[0]), b))
+        if hr < 1 or wr < 1 or int(lrsr_lv3.shape[-2]) < 1:
+            raise ValueError('empty Query/Key grid')
+
+    def _chunked_topk(self, q_norm, k_norm, k_eff):
+        """Top-k over reference positions, one query chunk at a time.
+
+        Does not concatenate the full ``[B, Nr, Nq]`` score matrix.
+        ``k_eff == 1`` uses ``torch.max`` so ties match hard top-1.
+        """
+        nq = int(q_norm.shape[-1])
+        chunk = int(self.match_query_chunk_size)
+        scores_l, idx_l, s_l, arg_l = [], [], [], []
+        for start in range(0, nq, chunk):
+            q = q_norm[:, :, start:start + chunk]
+            scores = torch.bmm(k_norm, q)  # [B, Nr, n]
+            n = int(scores.shape[-1])
+            if k_eff == 1:
+                val, arg = torch.max(scores, dim=1)
+                scores_l.append(val.unsqueeze(1))
+                idx_l.append(arg.unsqueeze(1))
+            else:
+                val, arg = torch.topk(scores, k_eff, dim=1)
+                scores_l.append(val)
+                idx_l.append(arg)
+            smax, sarg = torch.max(scores, dim=1)
+            s_l.append(smax)
+            arg_l.append(sarg)
+            del scores
+        top_scores = torch.cat(scores_l, dim=2)
+        top_idx = torch.cat(idx_l, dim=2)
+        s_raw = torch.cat(s_l, dim=1)
+        top1_arg = torch.cat(arg_l, dim=1)
+        return top_scores, top_idx, s_raw, top1_arg
+
+    def _mix_scale(self, ref, indices, weights, kernel, padding, stride,
+                   out_hw, n_ref):
+        unfolded = F.unfold(
+            ref, kernel_size=kernel, padding=padding, stride=stride)
+        if int(unfolded.shape[-1]) != int(n_ref):
+            raise ValueError(
+                'value unfold has %d patches, Key has %d; refusing to '
+                'truncate or reorder reference features' % (
+                    int(unfolded.shape[-1]), int(n_ref)))
+        # Key count is the lv3 grid; every scale must expose that many patches.
+        nq = int(indices.shape[-1])
+        parts = []
+        chunk = int(self.match_query_chunk_size)
+        for start in range(0, nq, chunk):
+            idx = indices[:, :, start:start + chunk]
+            w = weights[:, :, start:start + chunk]
+            needs_grad = torch.is_grad_enabled() and (
+                unfolded.requires_grad or w.requires_grad)
+            if needs_grad and self.match_transfer_recompute:
+                # Bind this chunk's tensors as arguments. Do not close over
+                # the loop index, or backward would replay the last chunk.
+                part = checkpoint(_weighted_gather, unfolded, idx, w)
+            else:
+                part = _weighted_gather(unfolded, idx, w)
+            parts.append(part)
+        mixed = torch.cat(parts, dim=2)
+        return _fold_with_overlap(
+            mixed, out_hw, kernel, padding, stride)
+
+    def _forward_topk_soft(
+            self, lrsr_lv3, refsr_lv3, ref_lv1, ref_lv2, ref_lv3,
+            return_diag=False, return_match_candidates=False):
+        """Top-k soft transfer. ``S`` stays the max raw cosine.
+
+        For ``k > 1``, ``torch.topk`` breaks ties by its own rule. That order
+        is not claimed to match ``torch.max`` or to be identical across devices.
+        ``k_eff = 1`` uses ``torch.max`` and weight 1, matching hard top-1.
+        """
+        self._validate_topk_config()
+        self._check_topk_grids(
+            lrsr_lv3, refsr_lv3, ref_lv1, ref_lv2, ref_lv3)
+        h_out, w_out = lrsr_lv3.shape[-2:]
+        hr, wr = refsr_lv3.shape[-2:]
+        q_unf = F.unfold(lrsr_lv3, kernel_size=(3, 3), padding=1)
+        k_unf = F.unfold(refsr_lv3, kernel_size=(3, 3), padding=1)
+        k_unf = k_unf.permute(0, 2, 1)
+        if int(q_unf.shape[-1]) != int(h_out) * int(w_out):
+            raise ValueError(
+                'Query unfold columns %d != H*W %d' % (
+                    int(q_unf.shape[-1]), int(h_out) * int(w_out)))
+        if int(k_unf.shape[1]) != int(hr) * int(wr):
+            raise ValueError(
+                'Key unfold rows %d != Hr*Wr %d' % (
+                    int(k_unf.shape[1]), int(hr) * int(wr)))
+        q_norm = F.normalize(q_unf, dim=1)
+        k_norm = F.normalize(k_unf, dim=2)
+        nr = int(k_norm.shape[1])
+        k_eff = min(int(self.match_topk), nr)
+        top_scores, top_idx, s_raw, top1_arg = self._chunked_topk(
+            q_norm, k_norm, k_eff)
+        shifted = top_scores - top_scores.max(dim=1, keepdim=True).values
+        weights = torch.softmax(shifted / self.match_temperature, dim=1)
+        # One scale at a time so the three value unfolds are not all live.
+        t_lv3 = self._mix_scale(
+            ref_lv3, top_idx, weights, 3, 1, 1,
+            (int(h_out), int(w_out)), nr)
+        t_lv2 = self._mix_scale(
+            ref_lv2, top_idx, weights, 6, 2, 2,
+            (int(h_out) * 2, int(w_out) * 2), nr)
+        t_lv1 = self._mix_scale(
+            ref_lv1, top_idx, weights, 12, 4, 4,
+            (int(h_out) * 4, int(w_out) * 4), nr)
+        s = s_raw.view(s_raw.shape[0], 1, int(h_out), int(w_out))
+        if not return_diag:
+            return s, t_lv3, t_lv2, t_lv1
+        w_det = weights.detach()
+        ent = -(w_det.clamp_min(1e-12).log() * w_det).sum(dim=1)
+        diag = {
+            'matching_mode': 'topk_soft',
+            'k_configured': int(self.match_topk),
+            'k_eff': int(k_eff),
+            'temperature': float(self.match_temperature),
+            'top1_raw_cosine_mean': float(s_raw.detach().mean()),
+            'max_candidate_weight_mean': float(w_det.max(dim=1).values.mean()),
+            'candidate_entropy_mean': float(ent.mean()),
+            'T_shapes': {
+                'lv3': tuple(int(x) for x in t_lv3.shape),
+                'lv2': tuple(int(x) for x in t_lv2.shape),
+                'lv1': tuple(int(x) for x in t_lv1.shape),
+            },
+            'lv3_hw': (int(h_out), int(w_out), int(hr), int(wr)),
+            # Top-1 index from torch.max (same rule as hard top-1). Candidate
+            # weights are not a calibrated confidence, and S is still the max
+            # cosine, not a softmax weight.
+            'match_arg': top1_arg.detach().cpu(),
+            'S_raw': s_raw.detach().cpu(),
+        }
+        if return_match_candidates:
+            diag['topk_scores'] = top_scores.detach()
+            diag['topk_indices'] = top_idx.detach()
+            diag['topk_weights'] = w_det
+        return s, t_lv3, t_lv2, t_lv1, diag
 
     @staticmethod
     def _match_diagnostics(R_star, R_arg, R_full, H, W, Hr, Wr,

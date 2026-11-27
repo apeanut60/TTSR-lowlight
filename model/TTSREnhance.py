@@ -79,6 +79,7 @@ class TTSREnhance(nn.Module):
             # Rejects any model_variant other than the one this code builds.
             rcfg = restoration_config_from_args(args)
             self.model_variant = rcfg['model_variant']
+            self.restoration_config = rcfg
             self.MainNet = CSFIUNet(
                 num_res_blocks=args.num_res_blocks,
                 n_feats=args.n_feats,
@@ -90,13 +91,31 @@ class TTSREnhance(nn.Module):
                 enable_lightup=bool(getattr(args, 'enable_lightup', True)),
                 use_global_illum=bool(getattr(args, 'use_global_illum', False)),
                 use_ref_illum=bool(getattr(args, 'use_ref_illum', False)),
-                ref_illum_pool=getattr(args, 'ref_illum_pool', 8))
+                ref_illum_pool=getattr(args, 'ref_illum_pool', 8),
+                gain_estimator=rcfg['gain_estimator'],
+                gain_channels=tuple(
+                    int(x) for x in str(rcfg['gain_channels']).split(',')),
+                gain_res_blocks=tuple(
+                    int(x) for x in str(rcfg['gain_res_blocks']).split(',')),
+                gain_attn_heads=rcfg['gain_attn_heads'],
+                gain_attn_depth=rcfg['gain_attn_depth'],
+                gain_attn_ffn_expansion=rcfg['gain_attn_ffn_expansion'],
+                gain_max_tokens=rcfg['gain_max_tokens'])
+            match_kwargs = dict(
+                matching_mode=rcfg['matching_mode'],
+                match_topk=rcfg['match_topk'],
+                match_temperature=rcfg['match_temperature'],
+                match_query_chunk_size=rcfg['match_query_chunk_size'],
+                match_transfer_recompute=rcfg['match_transfer_recompute'])
         elif backbone in ('mainnet', 'mainnet_enhance', 'same_res'):
+            self.model_variant = None
+            self.restoration_config = None
             self.MainNet = MainNetEnhance.MainNetEnhance(
                 num_res_blocks=self.num_res_blocks,
                 n_feats=args.n_feats,
                 res_scale=args.res_scale,
                 ref_illum_pool=getattr(args, 'ref_illum_pool', 8))
+            match_kwargs = dict(matching_mode='hard_top1')
         else:
             raise ValueError(
                 'Unknown backbone %r (expected csfi_unet|mainnet)' % backbone)
@@ -104,7 +123,7 @@ class TTSREnhance(nn.Module):
         self.LTE = LTE.LTE(requires_grad=not freeze_lte)
         self.LTE_copy = LTE.LTE(
             requires_grad=False)  # used in transferal perceptual loss
-        self.SearchTransfer = SearchTransfer.SearchTransfer()
+        self.SearchTransfer = SearchTransfer.SearchTransfer(**match_kwargs)
         self.RefCorrection = None
         if getattr(args, 'ref_correction', True):
             self.RefCorrection = RefCorrectionHead(

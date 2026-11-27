@@ -38,7 +38,7 @@ from dataset.block_amend_lolv2 import (
 )
 from model.TTSREnhance import TTSREnhance
 from model.restoration_config import (
-    MODEL_VARIANT, RESTORATION_DEFAULTS, reject_legacy_igab_state,
+    RESTORATION_DEFAULTS, reject_legacy_igab_state,
     require_model_variant, resolve_restoration_aliases,
 )
 from model.weight_init import apply_init_mode, load_strict_state, log_param_groups
@@ -176,8 +176,22 @@ def build_parser():
                    help='Not supported for epoch-aware aug; will error if set')
     # Model identity. None = baseline default (see RESTORATION_DEFAULTS).
     p.add_argument('--model_variant', type=str, default=None,
-                   help='Asserted model identity; this code only builds %s'
-                        % MODEL_VARIANT)
+                   help='csfi_lfca_v1 (local gain, hard top-1) or '
+                        'csfi_lfca_mgain_topk_v2 (spatial gain, top-k)')
+    p.add_argument('--gain_estimator', type=str, default=None)
+    p.add_argument('--gain_channels', type=str, default=None)
+    p.add_argument('--gain_res_blocks', type=str, default=None)
+    p.add_argument('--gain_attn_heads', type=int, default=None)
+    p.add_argument('--gain_attn_depth', type=int, default=None)
+    p.add_argument('--gain_attn_ffn_expansion', type=int, default=None)
+    p.add_argument('--gain_max_tokens', type=int, default=None)
+    p.add_argument('--gain_downsample', type=str, default=None)
+    p.add_argument('--gain_readout_scale', type=int, default=None)
+    p.add_argument('--matching_mode', type=str, default=None)
+    p.add_argument('--match_topk', type=int, default=None)
+    p.add_argument('--match_temperature', type=float, default=None)
+    p.add_argument('--match_query_chunk_size', type=int, default=None)
+    p.add_argument('--match_transfer_recompute', type=str, default=None)
     p.add_argument('--restoration_blocks', type=str, default=None,
                    help='Restoration block depth coarse(H/4),middle(H/2); '
                         'baseline 1,1')
